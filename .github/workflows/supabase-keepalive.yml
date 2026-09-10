@@ -1,0 +1,55 @@
+# Keeps the SwingAI Supabase project out of the free-tier auto-pause.
+#
+# A free Supabase project pauses after seven consecutive days with no API or
+# database traffic, and Supabase emailed a pause warning for this project on
+# 2026-09-09. A paused project takes the app's auth with it, so every login
+# fails until someone restores it by hand. The app is used in bursts, so a
+# quiet week is ordinary rather than a signal that nobody needs the data.
+#
+# This lives in the repo that owns the database rather than on the marketing
+# site, which is a manual drag-and-drop deploy with no build to hang a cron on.
+#
+# CAVEAT worth knowing: GitHub disables scheduled workflows in a repository
+# with no commits for 60 days, and emails the owner first. If this repo goes
+# untouched that long the ping stops with it. A paused project is still
+# restorable from the dashboard for 90 days, so the failure mode is downtime,
+# not data loss.
+name: Supabase keepalive
+
+on:
+  schedule:
+    # Daily, six spare days of margin before the seven-day pause.
+    - cron: "17 9 * * *"
+  # So the ping can be run on demand without waiting for the schedule.
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Postgres through the REST gateway
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_PUBLISHABLE_KEY:-}" ]; then
+            echo "::error::SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY is not set on this repository."
+            exit 1
+          fi
+
+          # A count-only HEAD against a real table. Hitting the REST gateway
+          # alone would not do: the point is to prove Postgres served a
+          # request, since that is what the pause timer measures.
+          status=$(curl -sS -o /dev/null -w '%{http_code}' -X HEAD \
+            "${SUPABASE_URL}/rest/v1/players?select=id&limit=1" \
+            -H "apikey: ${SUPABASE_PUBLISHABLE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_PUBLISHABLE_KEY}")
+
+          if [ "$status" != "200" ]; then
+            echo "::error::Supabase returned HTTP ${status}; the project may already be paused."
+            exit 1
+          fi
+
+          echo "keepalive ok (HTTP ${status})"
