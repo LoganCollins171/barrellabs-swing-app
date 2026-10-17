@@ -22,6 +22,18 @@ import os
 _client = None
 _resolved = False
 
+# Same kill switch as monitoring.py (kept independent/duplicated on purpose —
+# this module has no other dependency on monitoring.py and shouldn't gain
+# one just for this flag). See monitoring.py's comment for the string-vs-TOML-
+# boolean note.
+_TELEMETRY_DISABLE_FLAG = "BARRELLABS_DISABLE_TELEMETRY"
+
+
+def _telemetry_disabled() -> bool:
+    return os.environ.get(_TELEMETRY_DISABLE_FLAG, "").strip().lower() in (
+        "1", "true", "yes",
+    )
+
 
 def _get_client():
     """Lazily build the PostHog client from secrets/env, or None if unconfigured."""
@@ -29,6 +41,9 @@ def _get_client():
     if _resolved:
         return _client
     _resolved = True
+
+    if _telemetry_disabled():
+        return None  # explicit kill switch — stay a no-op regardless of key
 
     api_key = None
     host = "https://us.i.posthog.com"

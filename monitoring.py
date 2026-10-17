@@ -13,6 +13,21 @@ import os
 
 _initialized = False
 
+# Hard kill switch for telemetry, independent of whether a DSN/key is
+# configured. Set BARRELLABS_DISABLE_TELEMETRY=1 (any of 1/true/yes, not the
+# TOML boolean `true` — Streamlit only promotes string/int/float secrets to
+# environment variables) to force this module to stay a no-op even though the
+# code ships a working fallback DSN. Unset by default, so existing production
+# behavior is unchanged. Added for the Streamlit Community Cloud test so a
+# throwaway deploy can't report into the real Sentry project.
+_TELEMETRY_DISABLE_FLAG = "BARRELLABS_DISABLE_TELEMETRY"
+
+
+def _telemetry_disabled() -> bool:
+    return os.environ.get(_TELEMETRY_DISABLE_FLAG, "").strip().lower() in (
+        "1", "true", "yes",
+    )
+
 
 def init_monitoring() -> None:
     """Initialize Sentry once per process if a DSN is configured. Safe no-op
@@ -21,6 +36,9 @@ def init_monitoring() -> None:
     if _initialized:
         return
     _initialized = True
+
+    if _telemetry_disabled():
+        return  # explicit kill switch — stay a no-op regardless of DSN
 
     dsn = None
     try:
@@ -55,6 +73,8 @@ def init_monitoring() -> None:
 def capture(exc: BaseException, **context) -> None:
     """Manually report a caught exception (best-effort). Use in except blocks
     where the error is swallowed but you still want visibility."""
+    if _telemetry_disabled():
+        return
     try:
         import sentry_sdk
         if context:
