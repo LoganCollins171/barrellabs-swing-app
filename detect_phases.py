@@ -19,6 +19,7 @@ import sys
 
 import cv2
 import mediapipe as mp
+from pose_init import init_pose_model
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -149,10 +150,33 @@ def width_to_rotation_deg(widths):
 
 
 # ---------- POSE EXTRACTION ----------
+# model_complexity (BL-003Q): 1, not 2. MediaPipe ships the complexity-0
+# ("lite") and complexity-1 ("full") pose models INSIDE the pip wheel, but
+# complexity-2 ("heavy") is not bundled — the solutions API downloads it on
+# first use into its own install directory (mediapipe/python/solutions/
+# download_utils.py). Streamlit Community Cloud's runtime filesystem doesn't
+# allow that write, so model_complexity=2 always crashes there with
+# PermissionError before a single frame is processed, regardless of video
+# quality. Verified directly: a fresh `pip install mediapipe==0.10.14` has
+# pose_landmark_full.tflite (complexity 1) present immediately, and
+# pose_landmark_heavy.tflite (complexity 2) absent until that risky runtime
+# download succeeds. Complexity 1 is MediaPipe's own documented default/
+# recommended tier; 2 is an optional accuracy step up most callers don't
+# need. Real tradeoff, NOT hidden: side-by-side on the repo's own sample
+# clip, phase timing, knee angle, and separation numbers shifted
+# materially between complexity 1 and 2 — not a rounding-level difference.
+# That clip is a broadcast/crowd shot the app itself tells users not to
+# upload (not a clean single-subject phone video), so this isn't
+# necessarily representative of real user clips, but it hasn't been
+# re-measured against one either. Same landmark schema and indices either
+# way, so nothing downstream needed to change — but treat the accuracy
+# question as open, not resolved, until checked against a real well-filmed
+# clip.
 mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(
+pose = init_pose_model(
+    mp_pose.Pose,
     static_image_mode=False,
-    model_complexity=2,
+    model_complexity=1,
     enable_segmentation=False,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5,

@@ -26,6 +26,7 @@ from reportlab.pdfgen import canvas
 
 from analyzer import analyze, age_from_birth_year
 from bl_theme import inject_global_theme
+from pose_init import classify_detect_phases_failure
 from upload_paths import unique_upload_name
 from proc_utils import run_subprocess
 from development_tracker import render_development_tracker
@@ -4622,14 +4623,28 @@ with st.spinner("Tracking pose and detecting swing phases (~30–60 seconds)..."
     rc, out, err = run_subprocess(_detect_cmd, cwd=PROJECT_ROOT)
 
 if rc != 0:
-    st.error("We couldn't find a clear view of the hitter in that clip.")
-    st.markdown(
-        "This is almost always a filming issue, not your swing. For a clean read:\n\n"
-        "- **Film from the side**, perpendicular to the pitcher\n"
-        "- Keep the **whole body in frame** with good lighting\n"
-        "- A **3–6 second** clip of the swing is plenty\n\n"
-        "Your free analysis was **not** used — re-film and upload again."
-    )
+    # BL-003Q: a failure before any frame is processed (e.g. the pose model
+    # failing to initialize) is a technical problem on our end, not
+    # something re-filming fixes — don't blame the user's video for it.
+    # The RuntimeError("No frames had a detected pose.") path, which only
+    # fires after frames were actually processed, is the genuine filming
+    # case and keeps the original guidance below.
+    if classify_detect_phases_failure(err) == "model_init":
+        st.error("Our swing analyzer couldn't start up for this attempt — "
+                  "that's a technical issue on our end, not your video.")
+        st.markdown(
+            "Your free analysis was **not** used. Please try again in a "
+            "moment; if it keeps happening, let us know."
+        )
+    else:
+        st.error("We couldn't find a clear view of the hitter in that clip.")
+        st.markdown(
+            "This is almost always a filming issue, not your swing. For a clean read:\n\n"
+            "- **Film from the side**, perpendicular to the pitcher\n"
+            "- Keep the **whole body in frame** with good lighting\n"
+            "- A **3–6 second** clip of the swing is plenty\n\n"
+            "Your free analysis was **not** used — re-film and upload again."
+        )
     with st.expander("Technical details (for support)"):
         st.code(err or out, language="text")
     st.stop()
