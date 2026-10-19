@@ -4,6 +4,19 @@
 # and which warns st.components.v1.html (the dashboard iframe) is being removed.
 # 1.57.0 is the dev-verified version where analyze + the dashboard iframe work.
 streamlit==1.57.0
+# Pinned (BL-003E): streamlit==1.57.0 declares "starlette>=0.40.0" with no
+# upper bound. Starlette 1.8.0 (released 2026-10-13) changed response-message
+# ordering in a way Streamlit's own GZip middleware wrapper (through at least
+# 1.61.0) doesn't handle, producing a reproducible crash on ANY gzip-eligible
+# static response — including /favicon.png, which browsers request on every
+# page load. Verified locally: streamlit==1.57.0 + starlette>=1.8.0 crashes
+# that request with RuntimeError: Expected ASGI message 'http.response.start',
+# but got 'http.response.body'.; pinning starlette back to the last release
+# before the break (1.7.0) makes the same request return 200 with zero
+# errors, with no other change. Fixed upstream in Streamlit 1.62.0, but
+# bumping Streamlit here is a larger, separately-evaluated change (see
+# BL-003E) — this pin is the minimal fix for the current 1.57.0 pin above.
+starlette==1.7.0
 numpy>=1.26
 pandas>=2.2
 opencv-python-headless>=4.9
