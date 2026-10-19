@@ -146,11 +146,16 @@ class TestMatchReveal:
         assert "Juan Soto" in html
 
     def test_movement_match_pct_shown_when_confident(self):
-        """When confident=True the % is rendered labeled 'movement match'."""
+        """When confident=True the % is rendered with an honest label
+        (BL-004C: "movement match" -> "style match", sourced from
+        mlb_match.MATCH_LABEL, plus a caveat that this is an experimental
+        comparison, not a validated probability — the number itself is
+        unchanged)."""
         rec = _make_record(movement_match_pct=92, confident=True)
         html = _srd._build_match_reveal(rec)
         assert "92" in html
-        assert "movement match" in html.lower()
+        assert "style match" in html.lower()
+        assert "experimental" in html.lower()
 
     def test_movement_match_pct_hidden_when_not_confident(self):
         """When confident=False the % must NOT appear in the match reveal."""

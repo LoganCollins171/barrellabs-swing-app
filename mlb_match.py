@@ -5,6 +5,28 @@ from typing import Optional
 
 _EPS = 1e-6
 
+# BL-004C (4): shared presentation strings, single source of truth so every
+# page that shows this number (the full swing report, saved-reports/session
+# history, the compare-swings page, the dashboard, and the development
+# tracker) says the same honest thing, worded the same way.
+#
+# `movement_match_pct` (match_pro(), below) is a real, useful similarity
+# heuristic — exp(-distance/_MATCH_SCALE) against a 17-player reference
+# set, with z-scores clamped to ±3 — but its 1%-granularity presentation
+# ("75% match") implies a validated statistical probability that nothing
+# in this computation actually provides: _MATCH_SCALE is a design choice,
+# not a fit parameter, and 17 exemplars is a small set to imply fine-
+# grained distinguishability between e.g. 74% and 76%. The number itself
+# (the "diagnostic value") is NOT changed by this — only how it's labeled
+# and captioned, per BL-004C (4)'s explicit instruction not to touch the
+# underlying calculation.
+MATCH_LABEL = "style match"
+MATCH_CAVEAT = (
+    "Experimental movement-style comparison against a small reference "
+    "set — not a validated statistical probability."
+)
+MATCH_CAVEAT_SHORT = "Experimental style comparison, not a validated probability."
+
 
 def _g(d, *path, default=0.0):
     for k in path:

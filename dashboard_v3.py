@@ -31,6 +31,7 @@ Strategy (intentionally pragmatic for first integration pass):
 """
 from __future__ import annotations
 
+import html
 import os
 import re
 import math
@@ -1361,12 +1362,17 @@ def _build_hero_deck_html(latest: Dict[str, Any], history: List[Dict[str, Any]],
         f'in the "<span class="em">{band}</span>" band'
     )
 
+    # BL-004C (4): label + tooltip caveat from mlb_match.py's single
+    # source of truth — number unchanged, wording now matches every other
+    # page that shows this figure.
+    from mlb_match import MATCH_CAVEAT_SHORT as _match_caveat
     return (
         f'<p class="hero-deck">Across {n_swings} swing'
         f'{"s" if n_swings != 1 else ""} {when_phrase}, your peak hip-shoulder '
         f'separation reached <span class="em">{sep_peak_val}</span>{pb_phrase}. '
-        f'Your overall match score against <span class="em">{ref_name}</span> is '
-        f'<span class="em">{match_pct}%</span>, putting you {band_phrase}.</p>'
+        f'Your overall style-match score against <span class="em">{ref_name}</span> is '
+        f'<span class="em" title="{html.escape(_match_caveat)}">{match_pct}%</span>, '
+        f'putting you {band_phrase}.</p>'
     )
 
 
@@ -1614,8 +1620,12 @@ def _build_swap_pairs(
     ]
 
     # ----- Match stat pills at bottom of MLB card -----
+    # BL-004C (4): tooltip caveat from mlb_match.py's single source of
+    # truth — number unchanged, same wording as every other page.
+    from mlb_match import MATCH_CAVEAT_SHORT as _match_caveat
     pairs.append(('<span>Match score <span class="v gold">91%</span></span>',
-                  f'<span>Match score <span class="v gold">{match_pct}%</span></span>'))
+                  f'<span>Style-match score <span class="v gold" '
+                  f'title="{html.escape(_match_caveat)}">{match_pct}%</span></span>'))
     pairs.append(('<span>Considered <span class="v">17 references</span></span>',
                   f'<span>Considered <span class="v">{len(_MLB_META)} references</span></span>'))
 

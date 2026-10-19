@@ -191,9 +191,35 @@ def create_household_player(name: str, handedness: str = "RIGHT",
     from analyzer import parse_birth_year, is_under_coppa_age
     # COPPA consent is only legally required for an actual under-13. Teens
     # (13-17) are minors but not COPPA-covered, so adding them needs no extra
-    # affirmation. When no birth year is given we can't tell the age — fall back
-    # to the generic is_minor flag so we don't silently skip consent for a kid.
-    _needs_consent = bool(is_under_coppa_age(birth_year))
+    # affirmation.
+    #
+    # BL-004C fail-closed fix: is_under_coppa_age() returns None when the
+    # birth year is missing or unparseable, and its own docstring is
+    # explicit that None means "can't tell", never "old enough". The
+    # previous version here did `bool(is_under_coppa_age(birth_year))`,
+    # which silently evaluates a None result to False — i.e. "no birth
+    # year" silently became "no consent needed", exactly backwards. A
+    # comment claimed a fallback to the generic `is_minor` flag "so we
+    # don't silently skip consent for a kid", but that fallback was never
+    # actually implemented. It is now: when the birth year can't tell us
+    # the age, we trust `is_minor` (default True — fail closed) instead of
+    # silently treating "unknown" as "adult". Only an explicit
+    # `is_minor=False` (the caller affirmatively asserting this profile is
+    # not a minor — e.g. a coach or the household owner adding themselves)
+    # skips requiring a birth year at all, so this doesn't force
+    # unnecessary birth-year collection on genuinely adult profiles.
+    by = parse_birth_year(birth_year)
+    _age_minor_status = is_under_coppa_age(by)  # True / False / None
+    if _age_minor_status is None:
+        if is_minor:
+            return {"ok": False, "error": (
+                "Please enter this player's birth year — it's required to "
+                "tell whether parental consent is needed before the "
+                "profile can be created."
+            )}
+        _needs_consent = False
+    else:
+        _needs_consent = _age_minor_status
     if _needs_consent and not guardian_consent:
         return {"ok": False, "error": (
             "To add a player under 13 you must confirm you're their parent or "
@@ -213,7 +239,7 @@ def create_household_player(name: str, handedness: str = "RIGHT",
         # owner-scoped update on the new row (RLS already restricts this to the
         # household owner). birth_year keeps the child's first swing
         # age-bracketed; the guardian_consent_* fields are the COPPA record.
-        by = parse_birth_year(birth_year)
+        # (`by` was already parsed above, for the consent gate.)
         update_fields = {}
         if by is not None:
             update_fields["birth_year"] = by

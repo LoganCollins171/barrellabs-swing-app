@@ -664,12 +664,24 @@ def render_saved_reports_dashboard(user: Dict[str, Any],
                    if is_pb else "")
 
         # MLB similarity % (real biomech radar avg; hidden if unknown).
+        # BL-004C (4): label + tooltip caveat come from mlb_match.py's
+        # single source of truth — same wording as the full swing report
+        # and every other page that shows this number. The number itself
+        # is unchanged; a dense per-row list has no room for a full
+        # footnote, so the caveat lives in the title= tooltip here
+        # instead of an inline caption.
         try:
             sim = _radar_sim_pct(rec)
         except Exception:
             sim = None
-        sim_html = (f'<span class="srl-mlb-sim">{int(sim)}% match</span>'
-                    if isinstance(sim, (int, float)) else "")
+        if isinstance(sim, (int, float)):
+            from mlb_match import MATCH_LABEL, MATCH_CAVEAT_SHORT
+            sim_html = (
+                f'<span class="srl-mlb-sim" title="{html.escape(MATCH_CAVEAT_SHORT)}">'
+                f'{int(sim)}% {html.escape(MATCH_LABEL)}</span>'
+            )
+        else:
+            sim_html = ""
 
         # Score-trend sparkline for swings up to & including this one.
         try:

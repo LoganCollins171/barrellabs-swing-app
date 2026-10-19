@@ -226,7 +226,15 @@ class TestCreateHouseholdPlayerBirthYear:
         assert updates == [{"birth_year": 2009}]
         assert res["player"]["birth_year"] == 2009
 
-    def test_blank_birth_year_skips_update(self, monkeypatch, _stub_streamlit):
+    def test_blank_birth_year_skips_update_for_explicit_adult(
+            self, monkeypatch, _stub_streamlit):
+        """An explicitly non-minor profile (is_minor=False — e.g. the
+        household owner adding another adult) can still be created with no
+        birth year at all, with no follow-up write. BL-004C: this must stay
+        true even after the fail-closed consent fix, so adult workflows
+        aren't forced to collect unnecessary birth-year data (see
+        TestCreateHouseholdPlayerConsentFailClosed for the minor-path
+        enforcement, which is a *different* call shape: is_minor=True)."""
         import auth
         created = {"id": "p9", "user_id": "u", "name": "Kid",
                    "handedness": "RIGHT"}
@@ -247,6 +255,151 @@ class TestCreateHouseholdPlayerBirthYear:
 
         monkeypatch.setattr(auth, "get_client", lambda: _Client())
 
-        res = auth.create_household_player("Kid", birth_year="")
+        res = auth.create_household_player("Kid", birth_year="", is_minor=False)
         assert res["ok"] is True
         assert updates == []  # no valid birth year → no follow-up write
+
+
+class TestCreateHouseholdPlayerConsentFailClosed:
+    """BL-004C: create_household_player must fail closed when a minor's
+    age can't be verified, instead of silently treating "unknown" as
+    "doesn't need consent" (the bug: is_under_coppa_age() returns None for
+    a missing/invalid birth year, and the old code did
+    bool(None) == False, which bool()-coerced "can't tell" into "old
+    enough"). Covers: missing birth year, invalid birth year, an actual
+    underage player with and without consent, a teen (not COPPA-covered),
+    and an explicit adult profile needing neither."""
+
+    @staticmethod
+    def _client(created: dict):
+        """A minimal stub Supabase client: the create RPC returns `created`,
+        and any update() call records its payload and merges it in."""
+        updates = []
+
+        class _RPC:
+            def execute(self):
+                return types.SimpleNamespace(data=[dict(created)])
+
+        class _Tbl:
+            def update(self, payload):
+                self._p = payload
+                return self
+            def eq(self, *a, **k):
+                return self
+            def execute(self):
+                updates.append(self._p)
+                merged = dict(created)
+                merged.update(self._p)
+                return types.SimpleNamespace(data=[merged])
+
+        class _Client:
+            def rpc(self, *a, **k): return _RPC()
+            def table(self, *a, **k): return _Tbl()
+
+        return _Client(), updates
+
+    def test_missing_birth_year_with_default_is_minor_fails_closed(
+            self, monkeypatch, _stub_streamlit):
+        """The exact bug: no birth year, is_minor left at its default
+        (True). Must be REJECTED, not silently allowed through."""
+        import auth
+        client, updates = self._client(
+            {"id": "p1", "user_id": "u", "name": "Kid", "handedness": "RIGHT"})
+        monkeypatch.setattr(auth, "get_client", lambda: client)
+
+        res = auth.create_household_player("Kid")  # no birth_year at all
+        assert res["ok"] is False
+        assert "birth year" in res["error"].lower()
+        assert updates == []  # never reached the create RPC / DB at all
+
+    def test_invalid_birth_year_fails_closed(self, monkeypatch, _stub_streamlit):
+        """An unparseable/out-of-range birth year must be treated the same
+        as missing — never silently treated as "old enough"."""
+        import auth
+        client, updates = self._client(
+            {"id": "p2", "user_id": "u", "name": "Kid", "handedness": "RIGHT"})
+        monkeypatch.setattr(auth, "get_client", lambda: client)
+
+        for bad_value in ("not-a-year", "3000", "1850"):
+            res = auth.create_household_player("Kid", birth_year=bad_value)
+            assert res["ok"] is False, f"birth_year={bad_value!r} should fail closed"
+            assert "birth year" in res["error"].lower()
+        assert updates == []
+
+    def test_underage_player_without_consent_is_blocked(
+            self, monkeypatch, _stub_streamlit):
+        """A verified under-13 birth year, no guardian_consent → blocked,
+        with the specific COPPA error message (not the generic
+        missing-birth-year one — the birth year WAS provided here)."""
+        import auth
+        client, updates = self._client(
+            {"id": "p3", "user_id": "u", "name": "Kid", "handedness": "RIGHT"})
+        monkeypatch.setattr(auth, "get_client", lambda: client)
+
+        res = auth.create_household_player("Kid", birth_year=2017)  # ~9yo
+        assert res["ok"] is False
+        assert "parent or" in res["error"].lower()
+        assert "guardian" in res["error"].lower()
+        assert updates == []
+
+    def test_underage_player_with_consent_succeeds_and_stamps_record(
+            self, monkeypatch, _stub_streamlit):
+        """A verified under-13 birth year WITH guardian_consent=True must
+        succeed and stamp the consent audit-trail fields on the new row."""
+        import auth
+        client, updates = self._client(
+            {"id": "p4", "user_id": "u", "name": "Kid", "handedness": "RIGHT"})
+        monkeypatch.setattr(auth, "get_client", lambda: client)
+        monkeypatch.setattr(auth, "_current_user_id", lambda: "owner-uid")
+
+        res = auth.create_household_player(
+            "Kid", birth_year=2017, guardian_consent=True)
+        assert res["ok"] is True
+        assert len(updates) == 1
+        assert updates[0]["birth_year"] == 2017
+        assert updates[0]["guardian_consent_by"] == "owner-uid"
+        assert "guardian_consent_at" in updates[0]
+        assert updates[0]["guardian_consent_method"] == "authenticated_account"
+
+    def test_teen_birth_year_needs_no_consent(self, monkeypatch, _stub_streamlit):
+        """A verified 13-17 birth year is a minor but NOT COPPA-covered —
+        must succeed with no consent and no consent fields stamped."""
+        import auth
+        client, updates = self._client(
+            {"id": "p5", "user_id": "u", "name": "Teen", "handedness": "RIGHT"})
+        monkeypatch.setattr(auth, "get_client", lambda: client)
+
+        res = auth.create_household_player("Teen", birth_year=2012)  # ~14yo
+        assert res["ok"] is True
+        assert updates == [{"birth_year": 2012}]  # no guardian_consent_* keys
+
+    def test_explicit_adult_with_no_birth_year_needs_neither(
+            self, monkeypatch, _stub_streamlit):
+        """is_minor=False (an explicit, affirmative "this is not a minor")
+        must succeed with no birth year and no consent required — adult
+        workflows must keep working, and shouldn't be forced to supply
+        unnecessary personal information."""
+        import auth
+        client, updates = self._client(
+            {"id": "p6", "user_id": "u", "name": "Coach", "handedness": "RIGHT"})
+        monkeypatch.setattr(auth, "get_client", lambda: client)
+
+        res = auth.create_household_player("Coach", is_minor=False)
+        assert res["ok"] is True
+        assert updates == []
+
+    def test_is_minor_false_is_overridden_by_a_contradicting_birth_year(
+            self, monkeypatch, _stub_streamlit):
+        """If a birth year IS provided and it says under-13, that real
+        data must win over a caller's is_minor=False claim — never trust
+        an unverified flag over an actual verified age."""
+        import auth
+        client, updates = self._client(
+            {"id": "p7", "user_id": "u", "name": "Kid", "handedness": "RIGHT"})
+        monkeypatch.setattr(auth, "get_client", lambda: client)
+
+        res = auth.create_household_player(
+            "Kid", birth_year=2018, is_minor=False)  # contradicts is_minor
+        assert res["ok"] is False
+        assert "guardian" in res["error"].lower()
+        assert updates == []
