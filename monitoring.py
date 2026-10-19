@@ -63,6 +63,14 @@ def init_monitoring() -> None:
             traces_sample_rate=0.0,
             # Don't ship user PII (emails, IPs) to a third party by default.
             send_default_pii=False,
+            # BL-003I: sentry-sdk captures local variables in every stack
+            # frame of a reported exception by default. A function that ever
+            # holds a secret (e.g. a Supabase/Stripe key) as a local variable
+            # and then throws would otherwise ship that value into Sentry.
+            # Off by default in this app's own code regardless of whether
+            # any single frame actually touches a secret today — this is
+            # defense in depth, not a response to a known leak.
+            include_local_variables=False,
             environment=os.environ.get("SENTRY_ENV", "production"),
         )
     except Exception:

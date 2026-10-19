@@ -7,3 +7,13 @@ enableStaticServing = true
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# BL-003I: default is "full" (verified against the installed 1.57.0 source,
+# streamlit/config.py — ShowErrorDetailsConfigOptions), which shows full
+# exception types, messages, and tracebacks to ANY visitor in the browser on
+# an uncaught exception. "none" shows only a generic message in the browser;
+# full details still print to the server console/log (private), which is
+# enough for debugging without risking a secret value (e.g. from a
+# stack-frame repr or an error message) ever rendering on a public page.
+showErrorDetails = "none"
