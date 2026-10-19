@@ -1403,8 +1403,18 @@ inject_global_theme()
 _ALLOWED_PAGES_FROM_URL = {
     "dashboard", "saved_reports", "swing_report", "compare_swings",
     "development_tracker", "historical_charts", "drill_library", "billing",
-    "launch_progress", "pricing", "upload", "family", "facility",
+    "pricing", "upload", "family", "facility",
     "player_settings",  # Stripe billing-portal return URL routes here
+    # BL-004B (C.2): "launch_progress" deliberately removed. It was an
+    # internal pre-launch readiness checklist with no admin/role gate —
+    # any logged-in user who typed ?page=launch_progress could read it,
+    # and its content (stale as of this removal — see
+    # docs/internal/LAUNCH_PROGRESS_ROADMAP_ARCHIVED.md) included internal
+    # compliance/legal TODOs that shouldn't be customer-visible. No admin-
+    # role concept exists anywhere else in this codebase, so building a
+    # "properly verified" auth boundary for one page would be a new,
+    # separately-scoped feature rather than a narrow fix — removing it
+    # from customer-accessible routing is the correct minimal fix today.
 }
 try:
     _url_page = st.query_params.get("page")
@@ -3890,8 +3900,14 @@ def _render_launch_progress() -> None:
 
 
 if st.session_state.get("page") == "launch_progress":
-    _render_launch_progress()
-    st.stop()
+    # BL-004B (C.2): fail closed, defense-in-depth. "launch_progress" is no
+    # longer in _ALLOWED_PAGES_FROM_URL, so this should be unreachable —
+    # but if session_state["page"] ever ends up here some other way (a
+    # stale value from before this fix, a future code path that forgets
+    # the allowlist), do NOT render the internal roadmap. Send the user
+    # somewhere real instead of exposing it.
+    st.session_state["page"] = "dashboard"
+    st.rerun()
 
 
 # ---------- PLAYER SETTINGS PAGE (new dashboard-styled route) ----------

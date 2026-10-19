@@ -446,7 +446,7 @@ def _progress_card_html() -> str:
   </div>
   <div>
     <div class="dt-progress-meta-eyebrow">Session Progress</div>
-    <div class="dt-progress-meta-title">Training plan for Mario Ricard</div>
+    <div class="dt-progress-meta-title">Training plan for Jordan Ellis</div>
     <div class="dt-progress-meta-line">
       Built from your latest report on <strong>May 16, 2026</strong>.
       Check off drills as you complete them — progress saves automatically.

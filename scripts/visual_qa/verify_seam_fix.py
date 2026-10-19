@@ -140,7 +140,7 @@ import importlib
 bec = importlib.import_module("bl_edge_chrome")
 _CAP.clear()
 bec.render_edge_masthead(
-    {"name": "Mario Ricard", "gamification": {"current_streak_days": 7}},
+    {"name": "Jordan Ellis", "gamification": {"current_streak_days": 7}},
     active_page="dashboard",
 )
 mast_blob = "\n".join(_CAP)  # full <style> + masthead DOM with buttons

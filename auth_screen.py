@@ -1102,13 +1102,13 @@ def _render_signup_form() -> None:
         with n1:
             su_first = st.text_input(
                 "First name",
-                placeholder="Mario",
+                placeholder="Jordan",
                 key="su_first_v4",
             )
         with n2:
             su_last = st.text_input(
                 "Last name",
-                placeholder="Ricard",
+                placeholder="Ellis",
                 key="su_last_v4",
             )
         su_email = st.text_input(
