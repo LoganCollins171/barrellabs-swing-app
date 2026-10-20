@@ -1232,6 +1232,17 @@ _DASHBOARD_CSS = """
   letter-spacing: 0.10em;
   font-style: italic;
 }
+/* BL-004C (4): same treatment as .srd-match-nudge — small, muted, italic
+   caption — so the honesty caveat reads as a normal footnote, not an
+   alarming warning. */
+.srd-match-pct-caveat {
+  margin-top: 0.3rem;
+  color: var(--srd-bone-60);
+  font-family: var(--srd-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  font-style: italic;
+}
 
 /* Reconciliation line */
 .srd-reconcile {
@@ -2173,12 +2184,17 @@ def _build_match_reveal(record: Dict[str, Any]) -> str:
     style_text = (reference.get("style") or "")
 
     # Movement match % — only when confident and present; never /100
+    # BL-004C (4): label + caveat now come from mlb_match.py's single
+    # source of truth, so this reads consistently with every other page
+    # that shows this number. The number itself is unchanged.
     if confident and movement_pct is not None and mlb:
+        from mlb_match import MATCH_LABEL, MATCH_CAVEAT_SHORT
         pct_html = f"""
 <div class="srd-match-pct-row">
   <span class="srd-match-pct">{int(movement_pct)}%</span>
-  <span class="srd-match-pct-label">movement match</span>
+  <span class="srd-match-pct-label" title="{html.escape(MATCH_CAVEAT_SHORT)}">{html.escape(MATCH_LABEL)}</span>
 </div>
+<div class="srd-match-pct-caveat">{html.escape(MATCH_CAVEAT_SHORT)}</div>
 """
         nudge_html = ""
     else:

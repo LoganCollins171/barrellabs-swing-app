@@ -85,6 +85,15 @@ footer { display: none !important; }
     min-height: 100vh !important;
     position: static !important;
 }
+/* BL-007: this page was missing the overscroll-behavior fix that
+   bl_edge_chrome.py (used on every OTHER authenticated page) already
+   carries for the identical symptom family -- that file's own comment
+   describes it as fixing a "mobile scroll-lock/jank... locks for a
+   second, can't scroll back up", which matches the sign-in scroll trap
+   reported against this page. Applying the same proven fix here rather
+   than inventing a new one. See bl_edge_chrome.py's matching rule for
+   the original rationale. */
+html, body { overscroll-behavior-y: none; }
 [data-testid="stVerticalBlock"] { gap: 0 !important; }
 [data-testid="stElementContainer"] { margin: 0 !important; }
 
@@ -1102,13 +1111,13 @@ def _render_signup_form() -> None:
         with n1:
             su_first = st.text_input(
                 "First name",
-                placeholder="Mario",
+                placeholder="Jordan",
                 key="su_first_v4",
             )
         with n2:
             su_last = st.text_input(
                 "Last name",
-                placeholder="Ricard",
+                placeholder="Ellis",
                 key="su_last_v4",
             )
         su_email = st.text_input(

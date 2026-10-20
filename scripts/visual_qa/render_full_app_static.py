@@ -77,7 +77,7 @@ def build() -> str:
 
     _CAP.clear()
     bec.render_edge_masthead(
-        {"name": "Mario Ricard", "gamification": {"current_streak_days": 7}},
+        {"name": "Jordan Ellis", "gamification": {"current_streak_days": 7}},
         active_page="saved_reports",
     )
     masthead_html = "\n".join(_CAP)

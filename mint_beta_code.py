@@ -60,6 +60,19 @@ from typing import Optional
 #  Constants
 # --------------------------------------------------------------------
 VALID_PLANS = {"solo_pro", "family_pro", "coach_pro"}
+
+# BL-004C (3): companion to the pricing.py checkout pause. Coach Pro's
+# advertised roster/player-viewing features have no implementation
+# anywhere in this codebase (verified in BL-004B). A beta code minted for
+# coach_pro grants that entitlement through a path the pricing-page pause
+# doesn't touch at all (this script writes straight to Supabase via the
+# service-role key, bypassing the app entirely) — so it needs its own,
+# separate guard. This blocks the operator (this is a local admin-only
+# script, not customer-facing) from accidentally minting a new coach_pro
+# code while the feature is incomplete. Does not affect solo_pro/
+# family_pro, does not revoke any code already minted. Reverting is a
+# one-line flip of this constant.
+COACH_PRO_CODE_MINTING_PAUSED = True
 DEFAULT_DURATION_DAYS = 30
 CODE_ALPHABET = string.ascii_uppercase + string.digits
 CODE_RANDOM_LEN = 6  # post-prefix, so BL-XXXXXX = 9 chars total
@@ -208,6 +221,15 @@ def main(argv: Optional[list] = None) -> int:
         return 2
     if args.code and args.count != 1:
         print("ERROR: --code can only be combined with --count 1.", file=sys.stderr)
+        return 2
+    if args.plan == "coach_pro" and COACH_PRO_CODE_MINTING_PAUSED:
+        print(
+            "ERROR: Coach Pro code minting is paused (BL-004C) — its "
+            "advertised roster/player-viewing features aren't built yet. "
+            "Flip COACH_PRO_CODE_MINTING_PAUSED in this file to override "
+            "if you're intentionally testing that incomplete feature.",
+            file=sys.stderr,
+        )
         return 2
 
     expires_at: Optional[datetime] = None

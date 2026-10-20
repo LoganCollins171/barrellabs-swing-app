@@ -354,12 +354,12 @@ def build_dom_markdown_div() -> str:
         #      then the REAL widgets as SIBLINGS, not children ----
         _md_el('<section class="ps-card" id="ps-sec-profile"></section>'),
         _columns_row([
-            _text_input("First name", "Mario"),
-            _text_input("Last name", "Ricard"),
+            _text_input("First name", "Jordan"),
+            _text_input("Last name", "Ellis"),
         ]),
         _columns_row([
-            _text_input("Display name", "Mario R."),
-            _text_input("Email · login id", "mario@barrellabs.io"),
+            _text_input("Display name", "Jordan E."),
+            _text_input("Email · login id", "jordan@barrellabs.io"),
         ]),
         _md_el('</section>'),
         # ---- Baseball section ----
@@ -486,8 +486,8 @@ def build_dom_keyed() -> str:
     widgets = "".join([
         _md_el('<h1 class="ps-title">Player Settings</h1>'),
         _columns_row([
-            _text_input("First name", "Mario"),
-            _text_input("Last name", "Ricard"),
+            _text_input("First name", "Jordan"),
+            _text_input("Last name", "Ellis"),
         ]),
         _columns_row([
             _selectbox("Primary position",

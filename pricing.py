@@ -969,9 +969,46 @@ def _render_plan_card(col, plan_id: str, interval: str, *, featured: bool):
         st.markdown('</div>', unsafe_allow_html=True)
 
 
+# BL-004C (3): Coach Pro is sold at $79.99/mo with advertised features
+# (20-player roster, read-only coach views of each player's swing) that
+# have no implementation anywhere in this codebase — verified in BL-004B:
+# the only roster/seat infrastructure that exists (family_storage.py /
+# family_dashboard.py) checks exclusively for `is_family_pro_member`, with
+# no reference to coach_pro at all. A new Coach Pro subscriber today pays
+# for a roster feature they cannot actually use.
+#
+# This is a narrowly scoped, reversible, application-level safeguard: it
+# blocks NEW purchases/switches into coach_pro specifically (Solo and
+# Family are completely untouched — see the plan_id check below), and does
+# NOT touch Stripe prices/products/webhooks, does NOT cancel or alter any
+# existing subscription, and does NOT affect a user who is already on
+# Coach Pro (their "Current plan" button still renders normally, checked
+# above this gate). Reverting is a one-line flip of this constant.
+#
+# Known gap this does NOT close (see BL-004C report): the Billing /
+# Player Settings "redeem a beta code" flow (subscription_storage.py
+# redeem_beta_code) calls a Supabase RPC that is the sole authority on
+# which plan a given code grants — this Python layer never sees that
+# mapping before the RPC runs, so this flag cannot inspect or block a
+# beta code that happens to grant coach_pro. That path needs either a
+# live-DB check (out of this task's bounds — no Supabase schema/RPC
+# access was used or requested) or for no coach_pro codes to be minted
+# while this flag is on (mint_beta_code.py was separately hardened to
+# refuse --plan coach_pro, as a local, non-infra, reversible companion
+# fix — see that file).
+_COACH_PRO_SALES_PAUSED = True
+_COACH_PRO_PAUSED_MESSAGE = (
+    "Coach Pro's roster and player-viewing features aren't built yet, so "
+    "we've paused new signups for this plan rather than sell something "
+    "that doesn't work. Solo and Family plans are unaffected. Already on "
+    "Coach Pro? Nothing changes for you — reach out if you have questions."
+)
+
+
 def _render_upgrade_button(plan_id: str, interval: str, *, featured: bool):
     """Render the per-card CTA button. Handles every failure mode:
         - already on this exact plan          → 'Current plan' disabled
+        - coach_pro while sales are paused     → disabled, honest copy
         - no Stripe price id configured       → 'Coming soon' disabled
         - happy path                           → opens Stripe in new tab
     """
@@ -983,6 +1020,14 @@ def _render_upgrade_button(plan_id: str, interval: str, *, featured: bool):
 
     if on_pro and current_plan_id == plan_id:
         st.button("✓ Current plan", key=btn_key, disabled=True, width="stretch")
+        return
+
+    if plan_id == "coach_pro" and _COACH_PRO_SALES_PAUSED:
+        st.button(
+            "Signups paused",
+            key=btn_key, disabled=True, width="stretch",
+            help=_COACH_PRO_PAUSED_MESSAGE,
+        )
         return
 
     price_id = stripe_price_id(plan_id, interval)
@@ -1027,6 +1072,13 @@ def _render_upgrade_button(plan_id: str, interval: str, *, featured: bool):
 
 def _start_checkout(plan_id: str, interval: str) -> None:
     """Create a Stripe Checkout session and open it in a new tab."""
+    # BL-004C (3): defense-in-depth. The button that calls this already
+    # returns early for coach_pro while _COACH_PRO_SALES_PAUSED is True
+    # (see _render_upgrade_button) — this second check means a future
+    # caller can't bypass the pause by calling _start_checkout directly.
+    if plan_id == "coach_pro" and _COACH_PRO_SALES_PAUSED:
+        st.error(_COACH_PRO_PAUSED_MESSAGE)
+        return
     try:
         # Lazy import — keeps pricing.py importable when Stripe SDK is
         # missing (e.g. a CI environment without secrets.toml).

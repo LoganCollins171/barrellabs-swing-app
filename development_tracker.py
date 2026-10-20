@@ -5650,8 +5650,12 @@ def _build_data_hero_html(metrics: dict, swing_date: str) -> str:
         if isinstance(edge, int) else
         f'<span class="tp-bento-num">{edge}</span>'
     )
+    # BL-004C (4): same tooltip caveat as every other page showing this
+    # number — single source of truth in mlb_match.py. Number unchanged.
+    from mlb_match import MATCH_CAVEAT_SHORT as _match_caveat
     mlb_num_html = (
-        f'<span class="tp-bento-num">{mlb}<span class="unit">%</span></span>'
+        f'<span class="tp-bento-num" title="{_html.escape(_match_caveat)}">'
+        f'{mlb}<span class="unit">%</span></span>'
         if isinstance(mlb, int) else
         f'<span class="tp-bento-num">{mlb}</span>'
     )
