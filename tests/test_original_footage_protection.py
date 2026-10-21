@@ -16,6 +16,7 @@ from pathlib import Path
 from engine_v2.user_guided_flow import decode_and_cleanup, analyze_user_selection
 from engine_v2.decode import decode_with_timing
 from engine_v2.pose import extract_landmarks
+from engine_v2.safe_delete import register_owned_path
 
 _REAL_CLIP = "/Users/logancollins/baseball-swing-app/alex_bregman_swing.mp4"
 
@@ -23,10 +24,17 @@ _REAL_CLIP = "/Users/logancollins/baseball-swing-app/alex_bregman_swing.mp4"
 def _disposable_copy(src: str) -> str:
     """The pattern every test in this codebase must use from now on:
     copy BEFORE handing a path to anything that might delete it. Never
-    pass an original recording's own path to decode_and_cleanup."""
+    pass an original recording's own path to decode_and_cleanup.
+
+    BL-008C.21: the shared OS temp dir is no longer trusted by location
+    alone, so a test-created disposable copy must register itself as
+    app-owned the moment it's created -- exactly like real production
+    code would when it creates a genuinely disposable file outside
+    APP_UPLOAD_DIR."""
     fd, dst = tempfile.mkstemp(suffix=Path(src).suffix)
     os.close(fd)
     shutil.copyfile(src, dst)
+    register_owned_path(dst)
     return dst
 
 
@@ -55,6 +63,7 @@ def test_original_survives_failed_decode():
     fd, disposable = tempfile.mkstemp(suffix=".mp4")
     os.write(fd, b"this is not a real video file, decoding must fail")
     os.close(fd)
+    register_owned_path(disposable)
 
     frames, fps, error = decode_and_cleanup(disposable)
 
@@ -96,6 +105,27 @@ def test_original_survives_when_decode_raises_unexpectedly(monkeypatch, tmp_path
         pass
 
     assert not os.path.exists(real_disposable), "cleanup must still run even when decode is interrupted"
+
+
+def test_decode_and_cleanup_refuses_an_unregistered_temp_dir_file():
+    """BL-008C.21: strengthens the original BL-008C.19 regression proof.
+    Even a file that merely LIVES inside the shared OS temp dir -- not
+    inside a personal directory like ~/Downloads, just an ordinary
+    temp-dir path this app never registered as its own -- must now be
+    refused by decode_and_cleanup's safe_remove call, not silently
+    deleted just because of its location. This is the exact gap
+    directory-only allowlisting left open."""
+    fd, unregistered = tempfile.mkstemp(suffix=".mp4")
+    os.write(fd, b"a file this test deliberately never registers")
+    os.close(fd)
+    try:
+        import pytest
+        from engine_v2.safe_delete import UnsafeDeletionError
+        with pytest.raises(UnsafeDeletionError):
+            decode_and_cleanup(unregistered)
+        assert os.path.exists(unregistered), "an unregistered file must survive even a failed decode attempt"
+    finally:
+        os.remove(unregistered)
 
 
 def test_unconfirmed_and_confirmed_calls_never_touch_the_source_path_string():

@@ -58,11 +58,56 @@ class UnsafeDeletionError(Exception):
     path handling, not retry or swallow the error."""
 
 
+# BL-008C.21: directory allowlisting alone is NOT sufficient proof of
+# application ownership. APP_UPLOAD_DIR (uploads_streamlit/) is exclusive
+# to this app -- nothing else on the machine writes there, and every file
+# in it is saved by app.py itself with a uuid-stamped name
+# (upload_paths.unique_upload_name) -- so trusting that whole directory
+# is justified. tempfile.gettempdir(), by contrast, is SHARED by every
+# process on the machine; "this path happens to resolve inside /tmp" is
+# not evidence this app created it. A real file that a user, another
+# program, or a careless test script copies into system temp would
+# previously have passed the old directory-only check.
+#
+# The fix: within the shared OS temp directory, a path is only
+# considered app-owned if it was explicitly registered as disposable at
+# the moment THIS app created it (register_owned_path). Nothing is
+# trusted there by location alone anymore. APP_UPLOAD_DIR keeps
+# directory-level trust because that directory itself is the ownership
+# proof -- it's exclusively this app's, not shared.
+#
+# In-memory, per-process registry -- deliberately not persisted to disk
+# (no new architecture, no migration, no extra moving part). A process
+# restart naturally drops stale entries, which is fine: an abandoned
+# temp file left behind by a crashed process is handled separately by
+# cleanup_utils.prune_stale_files's age-based sweep over APP_UPLOAD_DIR,
+# which never touches the shared OS temp dir at all.
+_OWNED_PATHS: set[str] = set()
+
+
+def register_owned_path(path: str | os.PathLike) -> None:
+    """Call this at the exact moment the app creates a disposable file
+    outside APP_UPLOAD_DIR (e.g. a tempfile.mkstemp() scratch copy) --
+    marks it as something safe_remove is later allowed to delete. A path
+    that doesn't resolve is silently ignored (nothing to register)."""
+    try:
+        resolved = Path(path).resolve(strict=False)
+    except (OSError, RuntimeError):
+        return
+    _OWNED_PATHS.add(str(resolved))
+
+
+def _unregister_owned_path(resolved: Path) -> None:
+    _OWNED_PATHS.discard(str(resolved))
+
+
 def _resolved_owned_dirs() -> list[Path]:
     """Real, symlink-resolved app-owned directories it is ever safe to
-    delete a file from. Computed fresh each call (not cached at import
-    time) so a freshly created APP_UPLOAD_DIR is picked up correctly."""
-    dirs = [Path(tempfile.gettempdir()).resolve()]
+    delete a file from BY LOCATION ALONE. Computed fresh each call (not
+    cached at import time) so a freshly created APP_UPLOAD_DIR is picked
+    up correctly. Deliberately does NOT include the OS temp dir anymore
+    -- see the BL-008C.21 comment above _OWNED_PATHS."""
+    dirs = []
     try:
         dirs.append(APP_UPLOAD_DIR.resolve())
     except OSError:
@@ -72,10 +117,14 @@ def _resolved_owned_dirs() -> list[Path]:
 
 def is_app_owned_path(path: str | os.PathLike) -> bool:
     """True only if `path`, after resolving symlinks and relative
-    components, is a descendant of an app-owned temp/upload directory
-    AND is not inside one of the explicitly protected personal
-    directories. Both checks must pass -- this is intentionally
-    conservative; an ambiguous or unresolvable path is NOT safe."""
+    components, is EITHER (a) a descendant of APP_UPLOAD_DIR (an
+    exclusively app-owned directory -- trusted by location), OR (b) a
+    path this app explicitly registered as disposable via
+    register_owned_path (required for anything in the shared OS temp
+    dir, which is not exclusively owned by this app) -- AND is not
+    inside one of the explicitly protected personal directories either
+    way. All checks must pass -- this is intentionally conservative; an
+    ambiguous or unresolvable path is NOT safe."""
     try:
         resolved = Path(path).resolve(strict=False)
     except (OSError, RuntimeError):
@@ -94,7 +143,8 @@ def is_app_owned_path(path: str | os.PathLike) -> bool:
             return True
         except ValueError:
             continue
-    return False
+
+    return str(resolved) in _OWNED_PATHS
 
 
 def safe_remove(path: str | os.PathLike) -> None:
@@ -112,9 +162,17 @@ def safe_remove(path: str | os.PathLike) -> None:
         return
     if not is_app_owned_path(path):
         raise UnsafeDeletionError(
-            f"refusing to delete {os.path.basename(str(path))!r}: its resolved path is not inside an "
-            f"app-owned temp/upload directory (checked: {tempfile.gettempdir()!r} and "
-            f"{str(APP_UPLOAD_DIR)!r}). This guard exists specifically because BL-008C.19 accidentally "
-            f"deleted a real original recording this way -- see engine_v2/safe_delete.py."
+            f"refusing to delete {os.path.basename(str(path))!r}: its resolved path is neither inside "
+            f"the app's exclusive upload directory ({str(APP_UPLOAD_DIR)!r}) nor explicitly registered "
+            f"as a disposable file this app created (register_owned_path). Merely living inside the "
+            f"shared system temp dir ({tempfile.gettempdir()!r}) is not, by itself, proof this app owns "
+            f"it. This guard exists specifically because BL-008C.19 accidentally deleted a real original "
+            f"recording this way -- see engine_v2/safe_delete.py."
         )
+    try:
+        resolved = Path(path).resolve(strict=False)
+    except (OSError, RuntimeError):
+        resolved = None
     os.remove(path)
+    if resolved is not None:
+        _unregister_owned_path(resolved)

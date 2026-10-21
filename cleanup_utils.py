@@ -37,7 +37,7 @@ def prune_stale_files(upload_dir, project_root, max_age_hours: float = 2.0) -> i
     resolved path is inside an app-owned temp/upload directory before
     deleting anything (see that module's docstring for why -- the
     BL-008C.19 incident)."""
-    from engine_v2.safe_delete import safe_remove, UnsafeDeletionError
+    from engine_v2.safe_delete import safe_remove, register_owned_path, UnsafeDeletionError
 
     cutoff = time.time() - max_age_hours * 3600.0
     removed = 0
@@ -52,6 +52,16 @@ def prune_stale_files(upload_dir, project_root, max_age_hours: float = 2.0) -> i
                     if p.is_file() and match(p) and p.stat().st_mtime < cutoff:
                         if use_safe_remove:
                             try:
+                                # BL-008C.21: this sweep found `p` by
+                                # enumerating the exact directory the
+                                # caller designated as its own upload
+                                # dir -- that designation IS the
+                                # ownership assertion safe_remove now
+                                # requires for anything outside the
+                                # hardcoded APP_UPLOAD_DIR constant
+                                # (e.g. a test exercising this function
+                                # against its own fixture directory).
+                                register_owned_path(p)
                                 safe_remove(p)
                             except UnsafeDeletionError:
                                 continue  # refuse, don't delete, don't raise out of a best-effort sweep

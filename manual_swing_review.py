@@ -26,6 +26,17 @@ Does NOT yet persist results to Supabase (see BL008C19_FINAL_REPORT.md
 flagged, not-yet-made decision: what table/shape to store this new
 result type in). Results live only in st.session_state for the current
 session, same as the dev tool.
+
+BL-008C.21, noted honestly rather than silently: this page does NOT call
+entitlements.can_analyze_swing_for_account (or any gate) -- it is not
+currently metered by FREE_SWING_LIMIT, PILOT_SWING_LIMIT, or plan at
+all. That's a real, flagged gap, not a hidden bypass: results here are
+session-only and unsaved (see above), so an unmetered swing here has no
+lasting cost the way a persisted automatic-pipeline analysis does. Left
+unchanged this milestone rather than adding a gate under time pressure --
+see the BL-008C.21 final report's "five-video pilot access" section for
+why that's an acceptable, explicitly-stated tradeoff for this pilot
+rather than an oversight.
 """
 from __future__ import annotations
 

@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from engine_v2.safe_delete import safe_remove, is_app_owned_path, UnsafeDeletionError, APP_UPLOAD_DIR
+from engine_v2.safe_delete import (
+    safe_remove, is_app_owned_path, register_owned_path, UnsafeDeletionError, APP_UPLOAD_DIR,
+)
 
 
 def test_refuses_to_delete_a_path_under_downloads():
@@ -44,13 +46,71 @@ def test_refuses_to_delete_a_real_file_under_downloads(tmp_path, monkeypatch):
     assert victim.read_bytes() == b"not actually a video, just bytes that must survive"
 
 
-def test_allows_deletion_inside_the_os_temp_dir():
+def test_allows_deletion_inside_the_os_temp_dir_once_registered():
+    """BL-008C.21: the shared OS temp dir is no longer trusted by
+    location alone -- a path there is only deletable once this app
+    explicitly registers it as something it created."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as f:
         f.write(b"disposable temp copy")
         path = f.name
+    register_owned_path(path)
     assert is_app_owned_path(path)
     safe_remove(path)
     assert not os.path.exists(path)
+
+
+def test_unregistered_os_temp_dir_file_is_refused():
+    """BL-008C.21's core fix: a real file that merely happens to live
+    inside the shared OS temp dir -- e.g. dropped there by some other
+    process, or by a test that forgot to register it -- must NOT be
+    deletable just because of its location. Directory allowlisting alone
+    is not proof this app owns the file."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as f:
+        f.write(b"a file this app never registered as disposable")
+        path = f.name
+    try:
+        assert not is_app_owned_path(path), (
+            "an unregistered file in the shared OS temp dir must not be treated as app-owned"
+        )
+        with pytest.raises(UnsafeDeletionError):
+            safe_remove(path)
+        assert os.path.exists(path), "the unregistered file must survive the refused deletion"
+    finally:
+        os.remove(path)  # test's own direct cleanup, not safe_remove
+
+
+def test_registering_a_path_does_not_leak_across_unrelated_paths():
+    """Registering one disposable path must not accidentally make a
+    different, never-registered path in the same temp dir deletable."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as f1:
+        f1.write(b"registered")
+        registered_path = f1.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as f2:
+        f2.write(b"never registered")
+        other_path = f2.name
+    try:
+        register_owned_path(registered_path)
+        assert is_app_owned_path(registered_path)
+        assert not is_app_owned_path(other_path)
+    finally:
+        os.remove(registered_path) if os.path.exists(registered_path) else None
+        os.remove(other_path)
+
+
+def test_safe_remove_unregisters_after_successful_delete():
+    """Once deleted, a path's registry entry is cleared -- a later,
+    unrelated file that happens to get the same OS-recycled path name
+    (vanishingly unlikely with mkstemp, but checked anyway) is not
+    silently treated as still-owned."""
+    import engine_v2.safe_delete as sd
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as f:
+        f.write(b"disposable")
+        path = f.name
+    register_owned_path(path)
+    resolved = str(Path(path).resolve())
+    assert resolved in sd._OWNED_PATHS
+    safe_remove(path)
+    assert resolved not in sd._OWNED_PATHS
 
 
 def test_allows_deletion_inside_the_app_upload_dir():

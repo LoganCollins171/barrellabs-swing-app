@@ -9,6 +9,7 @@ import tempfile
 
 from engine_v2.types import LandmarkFrame
 from engine_v2.user_guided_flow import analyze_user_selection, decode_and_cleanup
+from engine_v2.safe_delete import register_owned_path
 
 
 def _lf(i, x, vis=0.9, landmarks=None):
@@ -100,6 +101,7 @@ def test_private_video_cleanup_removes_temp_file_on_success():
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
         tmp.write(b"not a real video, just bytes to delete")
         tmp_path = tmp.name
+    register_owned_path(tmp_path)  # BL-008C.21: shared OS temp dir now requires explicit registration
     assert os.path.isfile(tmp_path)
     lf, fps, error = decode_and_cleanup(tmp_path)
     assert not os.path.exists(tmp_path), "temp video file must be removed even when decoding fails"

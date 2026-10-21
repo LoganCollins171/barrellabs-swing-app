@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -224,20 +225,51 @@ def can_analyze_swing(plan_snapshot: Optional[dict]) -> EntitlementResult:
 # --------------------------------------------------------------------
 # A small, explicit set of account emails get a RAISED lifetime swing
 # limit instead of unlimited/Pro access -- deliberately narrow, never a
-# blanket bypass of the commercial Free-tier wall. Empty until the
-# owner provides the specific account identifier(s) to approve; adding
-# an email here is the ONLY step required to activate it for that
-# account, and the effect is scoped to exactly swing_limit_lifetime for
-# that one email, nothing else (no other Pro capability is granted).
+# blanket bypass of the commercial Free-tier wall.
 #
-# Deliberately NOT read from an environment variable or secrets.toml --
-# this is reviewable, committed, auditable code, matching how every
-# other entitlement rule in this file already works, not a hidden
-# runtime toggle.
-PILOT_SWING_LIMIT = 5  # predeclared margin for retries across 5 real recordings
-PILOT_ALLOWLIST: frozenset[str] = frozenset({
-    # "friend@example.com",  # <- owner adds the approved test account's email here
-})
+# BL-008C.21: moved OFF committed source (a personal email address must
+# never live in Git history) and ONTO the same deployment-secrets
+# mechanism every other optional integration in this app already uses
+# (see analytics.py/monitoring.py/auth.py's st.secrets.get(...) pattern).
+# To activate: in Streamlit Cloud's app Settings -> Secrets, add
+#     [pilot]
+#     allowlist = ["friend@example.com"]
+# (a TOML array; a single comma-separated string also works). Locally,
+# the equivalent is a PILOT_ALLOWLIST env var: a comma-separated list of
+# emails. Unset/missing/malformed config always resolves to an EMPTY
+# allowlist (default-deny) -- it never falls open, and this module never
+# raises because of a bad secrets value. Adding/removing an email is a
+# config change only, no code change, no redeploy of app logic needed
+# (Streamlit Cloud picks up a secrets change without touching this file).
+PILOT_SWING_LIMIT = 8  # 5 real recordings + margin for a few retries on the legacy automatic pipeline's gate
+
+
+def _load_pilot_allowlist() -> frozenset[str]:
+    """Reads the pilot allowlist from Streamlit secrets, falling back to an
+    env var, falling back to empty. Never raises -- any malformed/missing
+    config is treated as "nobody approved", not an error."""
+    raw: object = None
+    try:
+        import streamlit as st
+        raw = (st.secrets.get("pilot", {}) or {}).get("allowlist")
+    except Exception:
+        raw = None
+    if raw is None:
+        raw = os.environ.get("PILOT_ALLOWLIST")
+    emails: list[str] = []
+    try:
+        if isinstance(raw, str):
+            emails = raw.split(",")
+        elif isinstance(raw, (list, tuple, set, frozenset)):
+            emails = [str(e) for e in raw]
+    except Exception:
+        emails = []
+    return frozenset(
+        e.strip().lower() for e in emails if isinstance(e, str) and e.strip()
+    )
+
+
+PILOT_ALLOWLIST: frozenset[str] = _load_pilot_allowlist()
 
 
 def can_analyze_swing_for_account(plan_snapshot: Optional[dict], account_email: Optional[str]) -> EntitlementResult:
