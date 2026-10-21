@@ -3471,6 +3471,18 @@ if st.session_state.get("page") == "compare_swings":
     st.stop()
 
 
+if st.session_state.get("page") == "manual_review":
+    # BL-008C.19: separate, experimental user-guided swing review path
+    # (engine_v2.user_guided_flow). Completely independent of the
+    # automatic analyze()/Edge-Score/MLB-match pipeline above -- does not
+    # import from or modify analyzer.py, swing_score.py, or mlb_match.py.
+    # Reached only via the "select & confirm manually" button on the
+    # upload page, not a top-level nav tab.
+    from manual_swing_review import render_manual_swing_review
+    render_manual_swing_review(user)
+    st.stop()
+
+
 if st.session_state.get("page") == "billing":
     # Full premium Billing page — hero status banner, plan-aware primary
     # actions (Manage Subscription / Compare Plans / Upgrade), "what's
@@ -4543,8 +4555,23 @@ _pv_col, _pv_rest = st.columns([1, 1.5])
 with _pv_col:
     st.video(str(video_path))
 
-if not st.button("Analyze swing", type="primary", width="stretch",
-                 key="analyze_swing_btn"):
+_analyze_col, _manual_col = st.columns([1, 1])
+with _analyze_col:
+    _analyze_clicked = st.button("Analyze swing", type="primary", width="stretch",
+                                 key="analyze_swing_btn")
+with _manual_col:
+    # BL-008C.19: fallback path for when automatic analysis doesn't find
+    # the swing reliably. Reuses this same already-saved video_path --
+    # no second upload. Does not touch the automatic pipeline below.
+    if st.button("Select & confirm manually (experimental)", width="stretch",
+                 key="manual_review_btn", help="Pick the exact swing interval yourself if automatic "
+                                                "analysis seems off."):
+        st.session_state["manual_review_video_path"] = str(video_path)
+        st.session_state.pop("manual_review_frames", None)
+        st.session_state["page"] = "manual_review"
+        st.rerun()
+
+if not _analyze_clicked:
     st.stop()
 
 
