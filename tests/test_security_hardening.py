@@ -32,6 +32,11 @@ def test_show_error_details_is_none_in_config_toml():
 def test_sentry_init_disables_local_variable_capture(monkeypatch):
     monkeypatch.delenv("BARRELLABS_DISABLE_TELEMETRY", raising=False)
     monkeypatch.delenv("SENTRY_DSN", raising=False)
+    # BL-008C.24: PYTEST_CURRENT_TEST now also disables telemetry (closes
+    # the PYTHON-6 leak) -- this test specifically wants the REAL init
+    # path to run (with sentry_sdk.init mocked) to inspect its kwargs, so
+    # it has to opt back out of that new, otherwise-automatic protection.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     _reset_monitoring()
 
     import sentry_sdk

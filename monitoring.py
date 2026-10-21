@@ -24,6 +24,27 @@ _TELEMETRY_DISABLE_FLAG = "BARRELLABS_DISABLE_TELEMETRY"
 
 
 def _telemetry_disabled() -> bool:
+    """BL-008C.24: Sentry PYTHON-6 ("increment_free_swing_count returned -1
+    [simulated transient DB hiccup] ... tests.test_shared_swing_usage_re...")
+    was a real test exception that reached real production Sentry. Root
+    cause: this module's safety depended entirely on BARRELLABS_DISABLE_TELEMETRY
+    being explicitly exported before running pytest, or every single test
+    that exercises an exception path through capture() correctly mocking
+    sentry_sdk -- a per-test discipline that one missed mock (exactly what
+    happened: tests/test_shared_swing_usage_recording.py exercises
+    record_successful_swing_analysis's genuine except-block -> capture()
+    call with NO sentry_sdk mocking at all) silently defeats.
+
+    Fix: detect "running under pytest" automatically and unconditionally,
+    the same way as BARRELLABS_DISABLE_TELEMETRY, with no per-developer or
+    per-CI-run setup required. PYTEST_CURRENT_TEST is set by pytest itself
+    for the duration of every test (a well-established, zero-config pytest
+    idiom -- not something this project has to maintain or keep in sync).
+    This makes the failure class structurally impossible going forward:
+    a NEW test that forgets to mock sentry_sdk can no longer leak, because
+    telemetry is off for the entire pytest process regardless."""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return True
     return os.environ.get(_TELEMETRY_DISABLE_FLAG, "").strip().lower() in (
         "1", "true", "yes",
     )

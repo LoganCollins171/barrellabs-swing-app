@@ -30,6 +30,13 @@ _TELEMETRY_DISABLE_FLAG = "BARRELLABS_DISABLE_TELEMETRY"
 
 
 def _telemetry_disabled() -> bool:
+    """BL-008C.24: same automatic pytest-detection fix as monitoring.py's
+    identically-named function (see that module's comment for the full
+    Sentry PYTHON-6 root-cause story) -- PostHog shares the exact same
+    hardcoded-fallback-key risk shape, so the same fix applies here too,
+    even though no PostHog leak was reported."""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return True
     return os.environ.get(_TELEMETRY_DISABLE_FLAG, "").strip().lower() in (
         "1", "true", "yes",
     )

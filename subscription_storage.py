@@ -335,6 +335,38 @@ def increment_free_swing_count_idempotent(idempotency_key: str) -> int:
     return new_count
 
 
+def charge_nonce_for(session_state: dict, content_key: str) -> str:
+    """BL-008C.24 -- shared by both analysis pathways (previously
+    duplicated, independently, in app.py and manual_swing_review.py;
+    extracted here after being identical logic in two places, and so it
+    can be unit-tested directly without a running Streamlit app).
+
+    Returns a stable-until-success nonce for `content_key` (e.g. an
+    uploaded video's content hash, or a decoded-video-session-id +
+    selected-interval tuple), stored in the given session_state dict.
+    Calling this repeatedly for the SAME content_key before a success
+    returns the SAME nonce (retry-safe against a lost-ack double-charge).
+    Call clear_charge_nonce() after a charge succeeds so a LATER,
+    genuinely new analysis of the same content gets a fresh nonce
+    instead of silently reusing the first (already-spent) one -- the
+    exact bug this function's introduction fixed: a bare content hash or
+    bare (session, interval) tuple used directly as the idempotency key
+    is stable FOREVER, not just across retries of one attempt, so a
+    deliberate, legitimate second analysis of identical content would
+    otherwise come back free."""
+    import uuid
+    key = f"_charge_nonce::{content_key}"
+    if key not in session_state:
+        session_state[key] = uuid.uuid4().hex
+    return session_state[key]
+
+
+def clear_charge_nonce(session_state: dict, content_key: str) -> None:
+    """Call after a charge actually succeeds for `content_key` -- see
+    charge_nonce_for's docstring for why this matters."""
+    session_state.pop(f"_charge_nonce::{content_key}", None)
+
+
 def record_successful_swing_analysis(plan_snapshot: Optional[dict], idempotency_key: Optional[str] = None) -> bool:
     """BL-008C.22/.23 -- the ONE shared post-success usage-recording call
     for EVERY swing-analysis pathway (the legacy automatic pipeline and

@@ -56,6 +56,8 @@ from subscription_storage import (
     load_my_plan,
     increment_free_swing_count,
     record_successful_swing_analysis,
+    charge_nonce_for,
+    clear_charge_nonce,
 )
 
 # Note: GLOBAL PAGE ROUTING is intentionally placed AFTER set_page_config
@@ -4552,18 +4554,33 @@ _upload_bytes = upload.getbuffer()
 with open(video_path, "wb") as f:
     f.write(_upload_bytes)
 
-# BL-008C.23: a stable idempotency key for the usage-charge RPC below.
+# BL-008C.23/.24: a stable-ACROSS-RETRIES, but NOT stable-forever,
+# idempotency key for the usage-charge RPC below.
+#
 # video_path itself is NOT stable across a rerun -- unique_upload_name
 # mints a fresh random token on every script run, so re-clicking
 # "Analyze swing" after a failed charge would get a different video_path
-# each time and defeat retry-safety. A hash of the uploaded bytes IS
-# stable across reruns of the same selected file (Streamlit's uploader
-# widget keeps serving the same bytes until the user picks a different
-# file), so re-clicking for the same upload reuses the same key.
+# each time and defeat retry-safety. BL-008C.23 used a bare content hash
+# (SHA-256 of the uploaded bytes) to fix that -- but BL-008C.24 found a
+# real flaw in that design: a content hash alone is stable FOREVER, not
+# just across the retries of one attempt. Re-uploading the exact same
+# video file later (a legitimate, deliberate re-analysis -- case D in
+# the BL-008C.24 audit) would reuse the SAME key as the original,
+# already-charged attempt, and the migration's UNIQUE(user_id,
+# idempotency_key) constraint would make the RPC a silent no-op --
+# a free, uncounted second analysis of the same clip, forever.
+#
+# Fix: scope the key to a per-"pending attempt" nonce, keyed by content
+# hash in session_state, that is DELETED the moment a charge actually
+# succeeds (see the call site below) -- so a retry of a STILL-FAILING
+# attempt reuses the same nonce (retry-safe, no double charge), but a
+# brand-new "Analyze swing" click for the SAME content after an earlier
+# SUCCESS mints a fresh nonce (correctly charged again, not free).
 import hashlib as _hashlib
+_upload_content_hash = _hashlib.sha256(bytes(_upload_bytes)).hexdigest()
 _upload_idempotency_key = (
-    f"{(user or {}).get('slug', 'anon')}:"
-    f"{_hashlib.sha256(bytes(_upload_bytes)).hexdigest()}"
+    f"{(user or {}).get('slug', 'anon')}:{_upload_content_hash}:"
+    f"{charge_nonce_for(st.session_state, _upload_content_hash)}"
 )
 
 # Keep the preview compact so the Analyze button stays in view. A full-width
@@ -4858,6 +4875,15 @@ saved_record = save_swing_record(
 # transit. The swing record itself is already saved above regardless
 # (it's real data the user produced); only the REPORT DISPLAY is gated
 # on the charge succeeding.
+#
+# BL-008C.24: on SUCCESS, the pending-attempt nonce (keyed by content
+# hash, minted above) is deleted from session_state. This is what makes
+# a later, deliberate re-upload of the exact same video bytes correctly
+# chargeable again -- without this pop, the nonce would persist for the
+# life of the session and a second legitimate analysis of the same clip
+# would silently reuse the first (already-spent) idempotency key,
+# becoming free forever. On FAILURE, the nonce is deliberately left in
+# place so a retry of THIS SAME attempt stays safe from double-charging.
 if not record_successful_swing_analysis(_plan_snapshot, idempotency_key=_upload_idempotency_key):
     st.error(
         "Your swing was analyzed, but we couldn't record it against your account "
@@ -4866,6 +4892,7 @@ if not record_successful_swing_analysis(_plan_snapshot, idempotency_key=_upload_
         "double-charged for this attempt."
     )
     st.stop()
+clear_charge_nonce(st.session_state, _upload_content_hash)
 
 swing_history = load_swing_history(user["slug"])
 

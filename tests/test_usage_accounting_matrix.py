@@ -14,6 +14,83 @@ from entitlements import (
 
 
 # ---------------------------------------------------------------------
+# BL-008C.24 -- the shared charge-nonce helper, and the exact replay/
+# duplicate-charge matrix the milestone's audit asked for. This is the
+# real bug this session found: BL-008C.23's idempotency keys (a bare
+# content hash for the automatic pipeline, a bare (session, interval)
+# tuple for manual review) were stable FOREVER, not just across retries
+# of one attempt -- so a legitimate second analysis of the identical
+# video, or a deliberate re-run of the identical selection, would
+# silently come back free after the first successful charge, because
+# the ledger's UNIQUE(user_id, idempotency_key) constraint would treat
+# it as a duplicate of the first (already-paid-for) attempt.
+# ---------------------------------------------------------------------
+
+def test_case_A_rpc_succeeds_but_response_lost_retry_reuses_same_nonce():
+    """A: the client believes the charge failed (ack lost) and retries
+    the SAME attempt -- must get the SAME nonce, so the server-side
+    unique constraint (not locally testable, see the SQL migration
+    audit) can deduplicate it."""
+    ss_state = {}
+    n1 = ss.charge_nonce_for(ss_state, "content-abc")
+    n2 = ss.charge_nonce_for(ss_state, "content-abc")  # the "retry"
+    assert n1 == n2
+
+
+def test_case_D_legitimate_second_upload_of_identical_bytes_is_not_free():
+    """D: this is the exact bug BL-008C.24 found and fixed. A user
+    re-uploads the SAME video (identical content hash) after their
+    first analysis of it already succeeded and was charged -- the
+    second, genuinely new analysis attempt must get a DIFFERENT nonce,
+    not silently reuse the first (already-spent) one."""
+    ss_state = {}
+    first_nonce = ss.charge_nonce_for(ss_state, "content-abc")
+    ss.clear_charge_nonce(ss_state, "content-abc")  # simulates the first charge succeeding
+    second_nonce = ss.charge_nonce_for(ss_state, "content-abc")
+    assert first_nonce != second_nonce, (
+        "a legitimate second analysis of identical content must be charged again, "
+        "not silently treated as a replay of the first (already-paid-for) attempt"
+    )
+
+
+def test_case_E_two_distinct_selections_from_one_video_get_different_nonces():
+    """E: manual-review path -- two DIFFERENT swing intervals from the
+    SAME decoded video must be charged independently (different content
+    keys -> different nonces), which was already correct before this
+    session (the interval is part of the content key), re-confirmed
+    here as part of the full matrix."""
+    ss_state = {}
+    n_a = ss.charge_nonce_for(ss_state, "session123:970:1030")
+    n_b = ss.charge_nonce_for(ss_state, "session123:200:260")
+    assert n_a != n_b
+
+
+def test_case_I_failed_charge_after_expensive_computation_keeps_the_nonce():
+    """I: usage recording fails AFTER the (expensive) analysis already
+    completed -- the nonce must NOT be cleared (only clear_charge_nonce
+    on success), so the inevitable retry stays double-charge-safe."""
+    ss_state = {}
+    nonce_before = ss.charge_nonce_for(ss_state, "content-xyz")
+    # charge fails -- caller must NOT call clear_charge_nonce in this branch
+    nonce_after_failed_attempt = ss.charge_nonce_for(ss_state, "content-xyz")
+    assert nonce_before == nonce_after_failed_attempt
+
+
+def test_case_J_a_fresh_session_state_has_no_memory_of_a_prior_success():
+    """J: a refresh / new session means a brand new, empty session_state
+    dict -- charge_nonce_for correctly has no way to know the same
+    content was already charged in a DIFFERENT, now-gone session, and
+    mints a nonce as normal. This is intentional, not a gap: there is no
+    safe way to make "this exact video can only ever be charged once,
+    ever, across all sessions forever" without reintroducing the BL-008C.23
+    bug in a different form (see case D) -- per-session scoping (via
+    session_state) is the correct boundary, not a missed case."""
+    fresh_session_state = {}
+    nonce = ss.charge_nonce_for(fresh_session_state, "content-abc")
+    assert nonce  # just confirms it mints cleanly, no KeyError/crash
+
+
+# ---------------------------------------------------------------------
 # Row: Free account with remaining allowance
 # ---------------------------------------------------------------------
 def test_free_account_with_remaining_allowance_is_allowed_and_charges_once(monkeypatch):

@@ -48,7 +48,9 @@ import streamlit as st
 from engine_v2.user_guided_flow import decode_and_cleanup, analyze_user_selection
 from engine_v2.measurement_policy import classify_metric
 from entitlements import can_analyze_swing_for_account
-from subscription_storage import load_my_plan, record_successful_swing_analysis
+from subscription_storage import (
+    load_my_plan, record_successful_swing_analysis, charge_nonce_for, clear_charge_nonce,
+)
 
 EVIDENCE_MESSAGES = {
     "SINGLE_MOVEMENT_DETECTED": ("info", "We found one clear, well-bounded movement in this selection."),
@@ -201,15 +203,31 @@ def render_manual_swing_review(user: dict | None) -> None:
                     # from being revealed (st.session_state is never set
                     # to it) instead of showing it anyway -- the prior
                     # soft-fail-and-continue behavior was exactly the gap
-                    # this milestone closes. The idempotency key (stable
-                    # per decoded video + exact selection, set once when
-                    # frames were first decoded) means re-clicking
-                    # "Analyze this selection" for the SAME selection
-                    # after this error cannot double-charge.
+                    # this milestone closes.
+                    #
+                    # BL-008C.24: the idempotency key is now a
+                    # session_state-held NONCE per (decoded video,
+                    # selection), not just the raw (session_id, start,
+                    # end) tuple -- that tuple alone is stable FOREVER,
+                    # so a user who deliberately re-runs the exact same
+                    # already-charged selection a second time would
+                    # otherwise reuse the same key and get a free,
+                    # uncounted repeat (the same class of bug found and
+                    # fixed in app.py's content-hash key this session).
+                    # The nonce is popped on success (below) so a later,
+                    # genuinely new "Analyze" click for the same
+                    # selection mints a fresh one and is correctly
+                    # charged again; a retry of a still-failing attempt
+                    # reuses it and stays double-charge-safe.
                     if _result.status == "experimental_result":
                         _session_id = st.session_state.get("manual_review_analysis_session_id", "unknown")
-                        _key = f"{(user or {}).get('slug', 'anon')}:{_session_id}:{start_frame}:{end_frame}"
+                        _content_key = f"{_session_id}:{start_frame}:{end_frame}"
+                        _key = (
+                            f"{(user or {}).get('slug', 'anon')}:{_content_key}:"
+                            f"{charge_nonce_for(st.session_state, _content_key)}"
+                        )
                         if record_successful_swing_analysis(_plan_snapshot, idempotency_key=_key):
+                            clear_charge_nonce(st.session_state, _content_key)
                             st.session_state["manual_review_final_result"] = _result
                         else:
                             st.session_state["manual_review_paywall_reason"] = (
