@@ -1,7 +1,38 @@
-# BL-008C.21 -- Render-free hosting for app.barrellabsai.com
+# BL-008C.21/.22 -- Render-free hosting for app.barrellabsai.com
 
 Prepared, not executed. No DNS, no deploy, no new accounts. Read-only
-investigation performed 2026-10-21.
+investigation performed 2026-10-21, extended 2026-10-21 (BL-008C.22) to
+specifically check for a subdomain-only Cloudflare option before
+recommending a full-zone migration.
+
+## RANKED OPTIONS (BL-008C.22 summary -- see sections below for evidence)
+
+1. **Interim HTTPS redirect via the existing Netlify account** (safest,
+   zero DNS-zone risk, no new accounts, minutes of work) -- gets the
+   friend a working link NOW. Does not preserve the canonical hostname
+   after the redirect fires. Recommended as the IMMEDIATE next step so
+   domain routing never blocks product testing, per this milestone's
+   explicit instruction.
+2. **Cloudflare full-zone migration + Worker reverse proxy** (preserves
+   the canonical hostname, real HTTPS, real WebSocket support) -- the
+   only option that does that without a new paid plan. More
+   consequential (affects the whole domain's DNS, not just "app").
+   Recommended as the follow-up once the owner is ready for that
+   migration; not needed to unblock testing today.
+3. ~~Cloudflare Partial (CNAME) Setup, subdomain-only~~ -- investigated
+   this milestone and RULED OUT: requires a Business or Enterprise
+   Cloudflare plan (confirmed via Cloudflare's own docs). Not available
+   free.
+4. ~~Cloudflare subdomain delegation (NS-delegate only "app" to a
+   separate Cloudflare-hosted child zone)~~ -- investigated this
+   milestone and RULED OUT: creating a separate subdomain zone on
+   Cloudflare requires an Enterprise plan (confirmed via Cloudflare's own
+   community/docs). Not available free.
+5. ~~Plain CNAME straight to the Streamlit Cloud app~~ -- ruled out
+   previously (no custom-domain/TLS support on Streamlit Community
+   Cloud's free tier).
+6. ~~Netlify as the actual app host (not just a redirect)~~ -- ruled out
+   previously (Netlify cannot proxy WebSockets).
 
 ## Current verified DNS (read-only, via `dig`)
 
@@ -45,6 +76,30 @@ becomes interactive. Netlify is therefore unusable as the actual app
 host, full stop. It remains useful for one thing: a plain HTTP redirect
 (see "interim fallback" below), which is request/response only, not a
 persistent connection.
+
+## Why subdomain-only Cloudflare options don't work (BL-008C.22 finding)
+
+Specifically investigated this milestone, as requested, before falling
+back to a full-zone migration recommendation:
+- **Partial (CNAME) Setup** -- Cloudflare's own feature for proxying a
+  single subdomain while keeping DNS authority elsewhere. Confirmed via
+  Cloudflare's own docs: "A CNAME setup (partial) is only available to
+  customers on a Business or Enterprise plan." Free plan: no.
+- **Subdomain delegation to a Cloudflare-hosted child zone** (NS-delegate
+  just `app.barrellabsai.com` from NS1 to a brand-new, separate Cloudflare
+  zone for that one name, leaving the rest of `barrellabsai.com` on NS1
+  untouched) -- confirmed via Cloudflare's own community/docs: creating a
+  true subdomain zone inside Cloudflare requires an Enterprise plan. Free
+  plan: no. (NS-delegating a subdomain to some OTHER DNS provider is
+  free and common, but that only helps if the other provider is itself
+  Cloudflare -- which brings back the Enterprise requirement -- or
+  supports Worker-equivalent reverse proxying, which none of the
+  owner's other existing accounts, NS1/Netlify, do.)
+
+Both require upgrading to a paid Cloudflare plan, which is outside this
+milestone's "no purchases" constraint. This leaves exactly two
+Cloudflare-involving options: migrate the WHOLE zone to Cloudflare's free
+plan (below), or don't use Cloudflare at all (the interim redirect).
 
 ## Recommendation: Cloudflare Worker reverse proxy (not deployed)
 
@@ -159,3 +214,29 @@ Render. It does **not** keep `app.barrellabsai.com` visible in the browser
 after the redirect fires -- per the BL-008C.21 instructions, this is
 reported as the temporary fallback it is, not a substitute for the
 Cloudflare path above.
+
+Alternative, if even repointing the "app" DNS record isn't wanted yet:
+skip the domain entirely and just give the friend the live URL directly --
+`https://barrellabs-swing-yjaqcxes8gr2srqc35anny.streamlit.app/` -- which
+needs ZERO configuration changes of any kind and works right now, today,
+once the integrated code is actually deployed there. This is the
+literal "temporary access fallback using the existing Streamlit URL"
+BL-008C.22 asked for.
+
+## BL-008C.22 Worker code audit (deploy/cloudflare_proxy_worker.js)
+
+Reviewed critically against the checklist in BL-008C.22's instructions.
+Two real bugs were found and fixed in the prepared (still undeployed)
+script: (1) the original version would throw on every plain GET/HEAD
+page load because the Fetch API forbids a body on those methods and the
+code was forwarding the original request's body property unconditionally;
+(2) redirects pointing at the Streamlit origin's own absolute URL were
+passed through unrewritten, which would have silently broken the
+canonical-hostname illusion the whole proxy exists for. Both fixed; a
+network-free Node unit test (`deploy/cloudflare_proxy_worker.test.mjs`,
+8/8 passing) proves the fix for both. Several items on the checklist
+(real WebSocket upgrade behavior, Streamlit Cloud's own Origin
+validation, absolute-URL references inside the served JS bundle, actual
+large-upload streaming behavior) CANNOT be verified without an actual
+Cloudflare deployment -- stated here plainly rather than assumed away;
+see the file's own LIMITATIONS comment for the full list.

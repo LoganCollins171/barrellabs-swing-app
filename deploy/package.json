@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Scoped only to deploy/ -- declares ES module syntax so `node deploy/cloudflare_proxy_worker.test.mjs` can import cloudflare_proxy_worker.js's named exports directly. Not a real package, no dependencies, nothing here is installed or built."
+}

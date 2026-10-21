@@ -55,6 +55,7 @@ from entitlements import (
 from subscription_storage import (
     load_my_plan,
     increment_free_swing_count,
+    record_successful_swing_analysis,
 )
 
 # Note: GLOBAL PAGE ROUTING is intentionally placed AFTER set_page_config
@@ -4826,24 +4827,12 @@ saved_record = save_swing_record(
 # Tamper-resistant: counter lives in a separate table, incremented via
 # SECURITY DEFINER RPC, so deleting the swings row can't restore quota.
 # Soft-fail so a transient DB hiccup never blocks the analysis save.
-if not is_pro(_plan_snapshot):
-    try:
-        _bumped = increment_free_swing_count()
-        # The RPC returns -1 on failure. Capture it so a silently-failed
-        # increment (which would let a Free user squeeze an extra analysis past
-        # the cap) is at least visible to ops, rather than fully swallowed.
-        if _bumped == -1:
-            try:
-                from monitoring import capture
-                capture(RuntimeError("increment_free_swing_count returned -1"))
-            except Exception:
-                pass
-    except Exception as _inc_exc:
-        try:
-            from monitoring import capture
-            capture(_inc_exc)
-        except Exception:
-            pass
+# BL-008C.22: this is now the ONE shared post-success call used by both
+# this automatic pipeline AND the manual-review pathway (see
+# subscription_storage.record_successful_swing_analysis) -- not a second
+# counter system, the same RPC, called from the one place both pathways
+# now share.
+record_successful_swing_analysis(_plan_snapshot)
 
 swing_history = load_swing_history(user["slug"])
 

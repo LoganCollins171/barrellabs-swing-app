@@ -259,6 +259,45 @@ def increment_free_swing_count() -> int:
     return new_count
 
 
+def record_successful_swing_analysis(plan_snapshot: Optional[dict]) -> None:
+    """BL-008C.22 -- the ONE shared post-success usage-recording call for
+    EVERY swing-analysis pathway (the legacy automatic pipeline and the
+    experimental manual-review pathway alike). Not a new counter system --
+    this just centralizes the exact soft-fail call pattern app.py already
+    used inline, so a second pathway can reuse it instead of duplicating
+    it (or, worse, drifting from it).
+
+    Call this ONLY once, and ONLY from the code path that runs exactly
+    once per successful analysis click (i.e. inside the `if
+    st.button(...)` block, never from a plain rerun or a page-load check)
+    -- callers are responsible for that placement; this function itself
+    has no rerun/idempotency guard of its own, matching the existing
+    increment_free_swing_count() contract it wraps.
+
+    No-op for Pro/unlimited accounts (increment_free_swing_usage would be
+    meaningless for them and the RPC's own counter is Free-tier-scoped
+    anyway). Never raises -- a transient DB hiccup here must not turn a
+    successful analysis into a visible error for the user; the RPC's own
+    -1-return + capture() path already reports failures to ops."""
+    from entitlements import is_pro
+    if is_pro(plan_snapshot):
+        return
+    try:
+        bumped = increment_free_swing_count()
+        if bumped == -1:
+            try:
+                from monitoring import capture
+                capture(RuntimeError("increment_free_swing_count returned -1"))
+            except Exception:
+                pass
+    except Exception as exc:
+        try:
+            from monitoring import capture
+            capture(exc)
+        except Exception:
+            pass
+
+
 # --------------------------------------------------------------------
 #  Beta code redemption
 # --------------------------------------------------------------------

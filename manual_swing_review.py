@@ -27,16 +27,16 @@ flagged, not-yet-made decision: what table/shape to store this new
 result type in). Results live only in st.session_state for the current
 session, same as the dev tool.
 
-BL-008C.21, noted honestly rather than silently: this page does NOT call
-entitlements.can_analyze_swing_for_account (or any gate) -- it is not
-currently metered by FREE_SWING_LIMIT, PILOT_SWING_LIMIT, or plan at
-all. That's a real, flagged gap, not a hidden bypass: results here are
-session-only and unsaved (see above), so an unmetered swing here has no
-lasting cost the way a persisted automatic-pipeline analysis does. Left
-unchanged this milestone rather than adding a gate under time pressure --
-see the BL-008C.21 final report's "five-video pilot access" section for
-why that's an acceptable, explicitly-stated tradeoff for this pilot
-rather than an oversight.
+BL-008C.22: this page is now gated by the SAME shared entitlement check
+and usage counter as the legacy automatic pipeline (see app.py's
+"Analyze swing" button) -- entitlements.can_analyze_swing_for_account
+and subscription_storage.record_successful_swing_analysis, not a second,
+separate system. The gate runs inside the "Analyze this selection"
+button's own click-triggered run (same pattern app.py uses for its
+"Analyze swing" button), so a plain rerun -- a slider move, an unrelated
+button elsewhere on this page -- never re-checks or re-consumes quota;
+only an actual new click does. This closes the gap BL-008C.21 flagged
+(this page previously called no gate at all).
 """
 from __future__ import annotations
 
@@ -46,6 +46,8 @@ import streamlit as st
 
 from engine_v2.user_guided_flow import decode_and_cleanup, analyze_user_selection
 from engine_v2.measurement_policy import classify_metric
+from entitlements import can_analyze_swing_for_account
+from subscription_storage import load_my_plan, record_successful_swing_analysis
 
 EVIDENCE_MESSAGES = {
     "SINGLE_MOVEMENT_DETECTED": ("info", "We found one clear, well-bounded movement in this selection."),
@@ -131,6 +133,7 @@ def render_manual_swing_review(user: dict | None) -> None:
     if st.session_state.get("manual_review_checked_selection") != current_selection:
         st.session_state.pop("manual_review_check_result", None)
         st.session_state.pop("manual_review_final_result", None)
+        st.session_state.pop("manual_review_paywall_reason", None)
 
     if st.button("Check this selection", type="primary"):
         with st.spinner("Checking..."):
@@ -156,12 +159,45 @@ def render_manual_swing_review(user: dict | None) -> None:
             )
             st.caption("This is your own statement, not something BarrelLabs verifies automatically.")
             if st.button("Analyze this selection", disabled=not confirmed):
-                with st.spinner("Analyzing..."):
-                    st.session_state["manual_review_final_result"] = analyze_user_selection(
-                        frames, source_file="manual_review_upload", approx_start=start_frame, approx_end=end_frame,
-                        selected_by=f"human_reviewer:{(user or {}).get('slug', 'unknown')}",
-                        user_confirmed_swing=True,
+                # BL-008C.22: the SAME gate the automatic pipeline uses,
+                # checked fresh (force_refresh=True, same reasoning as
+                # app.py's identical call -- a stale cached plan must
+                # never under- or over-grant quota) inside this
+                # click-triggered run only. A blocked account sees the
+                # paywall and analyze_user_selection is never called --
+                # no compute spent, no quota touched, matching "failed
+                # analyses do not incorrectly consume usage."
+                _plan_snapshot = load_my_plan(force_refresh=True)
+                _gate = can_analyze_swing_for_account(_plan_snapshot, (user or {}).get("email"))
+                st.session_state.pop("manual_review_final_result", None)
+                if not _gate.allowed:
+                    st.session_state["manual_review_paywall_reason"] = (
+                        _gate.reason or "You've reached your swing-analysis limit."
                     )
+                else:
+                    st.session_state.pop("manual_review_paywall_reason", None)
+                    with st.spinner("Analyzing..."):
+                        _result = analyze_user_selection(
+                            frames, source_file="manual_review_upload", approx_start=start_frame, approx_end=end_frame,
+                            selected_by=f"human_reviewer:{(user or {}).get('slug', 'unknown')}",
+                            user_confirmed_swing=True,
+                        )
+                    st.session_state["manual_review_final_result"] = _result
+                    # Usage is recorded only for an actual successful
+                    # measurement -- "poor_quality" and any other
+                    # non-"experimental_result" status consumes nothing,
+                    # exactly like the automatic pipeline only counts a
+                    # completed, saved analysis.
+                    if _result.status == "experimental_result":
+                        record_successful_swing_analysis(_plan_snapshot)
+
+            _paywall_reason = st.session_state.get("manual_review_paywall_reason")
+            if _paywall_reason:
+                st.error(_paywall_reason)
+                if st.button("See plans & upgrade", key="manual_review_paywall_upgrade"):
+                    st.session_state.pop("manual_review_paywall_reason", None)
+                    st.session_state["page"] = "pricing"
+                    st.rerun()
 
     final_result = st.session_state.get("manual_review_final_result")
     if final_result is not None and st.session_state.get("manual_review_checked_selection") == current_selection:
