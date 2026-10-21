@@ -9,6 +9,13 @@ Public surface:
     load_my_plan()              -> dict | None   (reads v_my_plan)
     invalidate_my_plan_cache()  -> None          (drops Streamlit cache)
     increment_free_swing_count()-> int           (RPC)
+    increment_free_swing_count_idempotent(key)
+                                 -> int           (RPC, retry-safe)
+    record_successful_swing_analysis(plan, key=None)
+                                 -> bool          (the ONE call every analysis
+                                                    pathway uses -- caller MUST
+                                                    check the return value
+                                                    before revealing results)
     redeem_beta_code(code)      -> dict          (RPC, raises ValueError)
 
 Design rules:
@@ -41,6 +48,20 @@ _CACHE_KEY = "_my_plan_snapshot"
 def _is_jwt_expired_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     return ("jwt expired" in msg) or ("pgrst303" in msg)
+
+
+def _is_missing_function_error(exc: Exception) -> bool:
+    """BL-008C.23: true only when the error means 'this RPC doesn't exist
+    in this environment' (Postgres undefined_function 42883, or
+    PostgREST's own 'no matching function' PGRST202) -- i.e. the
+    increment_free_swing_usage_idempotent() migration hasn't been
+    applied here yet. Used ONLY to decide whether falling back to the
+    legacy, non-idempotent RPC is safe; never used for any other error,
+    since a generic/transient error must NOT trigger a fallback call (a
+    lost-ack retry falling back to a different, non-idempotent RPC would
+    be exactly the double-charge bug this migration exists to prevent)."""
+    msg = str(exc).lower()
+    return ("pgrst202" in msg) or ("42883" in msg) or ("could not find the function" in msg)
 
 
 def _flag_session_expired() -> None:
@@ -259,43 +280,116 @@ def increment_free_swing_count() -> int:
     return new_count
 
 
-def record_successful_swing_analysis(plan_snapshot: Optional[dict]) -> None:
-    """BL-008C.22 -- the ONE shared post-success usage-recording call for
-    EVERY swing-analysis pathway (the legacy automatic pipeline and the
-    experimental manual-review pathway alike). Not a new counter system --
-    this just centralizes the exact soft-fail call pattern app.py already
-    used inline, so a second pathway can reuse it instead of duplicating
-    it (or, worse, drifting from it).
+def increment_free_swing_count_idempotent(idempotency_key: str) -> int:
+    """BL-008C.23 -- same contract as increment_free_swing_count() (bump
+    the counter, return the new total, -1 on failure), but safe to call
+    more than once for the SAME logical analysis attempt: the server-side
+    ledger (swing_analysis_charges, see
+    supabase/migrations/2026_10_21_idempotent_swing_usage.sql) guarantees
+    a second call with the same idempotency_key is a no-op that returns
+    the current (unchanged) count rather than incrementing again. This
+    is what actually closes the "lost ack" gap a plain retry of
+    increment_free_swing_count() cannot: that function has no way to
+    tell a retried call apart from a brand-new one.
 
-    Call this ONLY once, and ONLY from the code path that runs exactly
-    once per successful analysis click (i.e. inside the `if
-    st.button(...)` block, never from a plain rerun or a page-load check)
-    -- callers are responsible for that placement; this function itself
-    has no rerun/idempotency guard of its own, matching the existing
-    increment_free_swing_count() contract it wraps.
+    Falls back to the legacy, non-idempotent RPC automatically if this
+    environment hasn't had the migration applied yet (detected via
+    _is_missing_function_error, never guessed) -- so this function is
+    safe to call in every environment starting the moment this code
+    ships, independent of when/whether the migration itself is applied.
+    """
+    sb = get_client()
+    try:
+        resp = sb.rpc("increment_free_swing_usage_idempotent", {"p_idempotency_key": idempotency_key}).execute()
+    except Exception as exc:
+        if _is_jwt_expired_error(exc):
+            _flag_session_expired()
+            return -1
+        if _is_missing_function_error(exc):
+            # Migration not applied here yet -- the legacy RPC has no
+            # idempotency key, but it's still correct for the common,
+            # non-retried case, and falling back here (BEFORE any charge
+            # has been attempted under either name) cannot double-charge.
+            return increment_free_swing_count()
+        try:
+            st.warning(f"Could not update swing count: {exc}")
+        except Exception:
+            pass
+        return -1
 
-    No-op for Pro/unlimited accounts (increment_free_swing_usage would be
-    meaningless for them and the RPC's own counter is Free-tier-scoped
-    anyway). Never raises -- a transient DB hiccup here must not turn a
-    successful analysis into a visible error for the user; the RPC's own
-    -1-return + capture() path already reports failures to ops."""
+    val = resp.data
+    if isinstance(val, int):
+        new_count = val
+    elif isinstance(val, list) and val and isinstance(val[0], (int, dict)):
+        first = val[0]
+        new_count = first if isinstance(first, int) else int(
+            first.get("increment_free_swing_usage_idempotent") or 0
+        )
+    else:
+        try:
+            new_count = int(val) if val is not None else 0
+        except Exception:
+            new_count = 0
+
+    invalidate_my_plan_cache()
+    return new_count
+
+
+def record_successful_swing_analysis(plan_snapshot: Optional[dict], idempotency_key: Optional[str] = None) -> bool:
+    """BL-008C.22/.23 -- the ONE shared post-success usage-recording call
+    for EVERY swing-analysis pathway (the legacy automatic pipeline and
+    the experimental manual-review pathway alike). Not a new counter
+    system -- centralizes one call pattern so a second pathway reuses it
+    instead of duplicating (or drifting from) it.
+
+    BL-008C.23 CHANGE: this now returns a bool the caller MUST check
+    before revealing/saving results -- True means "charged (or Pro,
+    nothing to charge) -- safe to deliver the result", False means "the
+    usage RPC failed -- do NOT deliver results for this attempt; show an
+    error and let the user retry." The previous soft-fail-and-deliver-
+    anyway behavior is exactly the bug BL-008C.23 was opened to close: it
+    let a Free user get an uncounted analysis for free whenever the RPC
+    hiccuped. Concealing a quota failure behind a warning while still
+    delivering the result is no longer acceptable (explicit instruction).
+
+    `idempotency_key`, when provided, routes through
+    increment_free_swing_count_idempotent so a user-initiated retry of
+    the SAME attempt (same key, e.g. re-clicking "Analyze" after a
+    failure on the exact same selection) cannot double-charge even if an
+    earlier attempt's success response was lost in transit. Callers that
+    don't pass one fall back to the legacy, non-idempotent RPC -- still
+    correct for a first attempt, just without retry protection.
+
+    Call this ONLY once per attempt, from the code path that runs
+    exactly once per click (inside the `if st.button(...)` block) --
+    unchanged requirement from BL-008C.22.
+
+    No-op (returns True) for Pro/unlimited accounts. Reports every
+    failure to monitoring -- unlike before, a failure is no longer
+    something the caller can silently proceed past."""
     from entitlements import is_pro
     if is_pro(plan_snapshot):
-        return
+        return True
     try:
-        bumped = increment_free_swing_count()
-        if bumped == -1:
-            try:
-                from monitoring import capture
-                capture(RuntimeError("increment_free_swing_count returned -1"))
-            except Exception:
-                pass
+        if idempotency_key:
+            bumped = increment_free_swing_count_idempotent(idempotency_key)
+        else:
+            bumped = increment_free_swing_count()
     except Exception as exc:
         try:
             from monitoring import capture
             capture(exc)
         except Exception:
             pass
+        return False
+    if bumped == -1:
+        try:
+            from monitoring import capture
+            capture(RuntimeError("swing usage recording returned -1"))
+        except Exception:
+            pass
+        return False
+    return True
 
 
 # --------------------------------------------------------------------
@@ -346,5 +440,7 @@ __all__ = [
     "load_my_plan",
     "invalidate_my_plan_cache",
     "increment_free_swing_count",
+    "increment_free_swing_count_idempotent",
+    "record_successful_swing_analysis",
     "redeem_beta_code",
 ]

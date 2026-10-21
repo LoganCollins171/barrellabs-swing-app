@@ -41,6 +41,7 @@ only an actual new click does. This closes the gap BL-008C.21 flagged
 from __future__ import annotations
 
 import os
+import uuid
 
 import streamlit as st
 
@@ -115,6 +116,14 @@ def render_manual_swing_review(user: dict | None) -> None:
                 return
             st.session_state["manual_review_frames"] = lf
             st.session_state["manual_review_fps"] = fps
+            # BL-008C.23: a stable per-decoded-video id for the usage-
+            # charge idempotency key below -- generated once here (not
+            # per click), so re-clicking "Analyze this selection" for
+            # the SAME selection after a failed charge reuses the same
+            # key and cannot double-charge, even though the original
+            # video file is already gone (decode_and_cleanup deleted it)
+            # by the time any charge attempt happens.
+            st.session_state["manual_review_analysis_session_id"] = uuid.uuid4().hex
 
     frames = st.session_state["manual_review_frames"]
     fps = st.session_state.get("manual_review_fps", 30.0) or 30.0
@@ -182,14 +191,35 @@ def render_manual_swing_review(user: dict | None) -> None:
                             selected_by=f"human_reviewer:{(user or {}).get('slug', 'unknown')}",
                             user_confirmed_swing=True,
                         )
-                    st.session_state["manual_review_final_result"] = _result
                     # Usage is recorded only for an actual successful
                     # measurement -- "poor_quality" and any other
                     # non-"experimental_result" status consumes nothing,
                     # exactly like the automatic pipeline only counts a
                     # completed, saved analysis.
+                    #
+                    # BL-008C.23: a failed charge now BLOCKS the result
+                    # from being revealed (st.session_state is never set
+                    # to it) instead of showing it anyway -- the prior
+                    # soft-fail-and-continue behavior was exactly the gap
+                    # this milestone closes. The idempotency key (stable
+                    # per decoded video + exact selection, set once when
+                    # frames were first decoded) means re-clicking
+                    # "Analyze this selection" for the SAME selection
+                    # after this error cannot double-charge.
                     if _result.status == "experimental_result":
-                        record_successful_swing_analysis(_plan_snapshot)
+                        _session_id = st.session_state.get("manual_review_analysis_session_id", "unknown")
+                        _key = f"{(user or {}).get('slug', 'anon')}:{_session_id}:{start_frame}:{end_frame}"
+                        if record_successful_swing_analysis(_plan_snapshot, idempotency_key=_key):
+                            st.session_state["manual_review_final_result"] = _result
+                        else:
+                            st.session_state["manual_review_paywall_reason"] = (
+                                "Your selection was analyzed, but we couldn't record it against your "
+                                "account (a temporary connection issue on our end, not something you did "
+                                "wrong). Click “Analyze this selection” again to retry -- you "
+                                "will not be double-charged for this attempt."
+                            )
+                    else:
+                        st.session_state["manual_review_final_result"] = _result
 
             _paywall_reason = st.session_state.get("manual_review_paywall_reason")
             if _paywall_reason:

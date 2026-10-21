@@ -4548,8 +4548,23 @@ if getattr(upload, "size", 0) and upload.size > _MAX_UPLOAD_MB * 1024 * 1024:
 # let concurrent users overwrite each other's video/fingerprint mid-analysis.
 video_path = UPLOAD_DIR / unique_upload_name(upload.name,
                                              owner=(user or {}).get("slug"))
+_upload_bytes = upload.getbuffer()
 with open(video_path, "wb") as f:
-    f.write(upload.getbuffer())
+    f.write(_upload_bytes)
+
+# BL-008C.23: a stable idempotency key for the usage-charge RPC below.
+# video_path itself is NOT stable across a rerun -- unique_upload_name
+# mints a fresh random token on every script run, so re-clicking
+# "Analyze swing" after a failed charge would get a different video_path
+# each time and defeat retry-safety. A hash of the uploaded bytes IS
+# stable across reruns of the same selected file (Streamlit's uploader
+# widget keeps serving the same bytes until the user picks a different
+# file), so re-clicking for the same upload reuses the same key.
+import hashlib as _hashlib
+_upload_idempotency_key = (
+    f"{(user or {}).get('slug', 'anon')}:"
+    f"{_hashlib.sha256(bytes(_upload_bytes)).hexdigest()}"
+)
 
 # Keep the preview compact so the Analyze button stays in view. A full-width
 # video pushed the button far below the fold, forcing a scroll to analyze.
@@ -4826,13 +4841,31 @@ saved_record = save_swing_record(
 # ---------- USAGE COUNTER: bump free-swing tally for Free users ----------
 # Tamper-resistant: counter lives in a separate table, incremented via
 # SECURITY DEFINER RPC, so deleting the swings row can't restore quota.
-# Soft-fail so a transient DB hiccup never blocks the analysis save.
-# BL-008C.22: this is now the ONE shared post-success call used by both
-# this automatic pipeline AND the manual-review pathway (see
+# BL-008C.22: this is the ONE shared post-success call used by both this
+# automatic pipeline AND the manual-review pathway (see
 # subscription_storage.record_successful_swing_analysis) -- not a second
 # counter system, the same RPC, called from the one place both pathways
 # now share.
-record_successful_swing_analysis(_plan_snapshot)
+#
+# BL-008C.23: a failed charge now BLOCKS the report below instead of
+# silently delivering it anyway -- the prior soft-fail-and-continue
+# behavior let a Free user get an uncounted analysis for free whenever
+# the RPC hiccuped, which is exactly the gap this milestone closes.
+# _upload_idempotency_key (content hash, stable across reruns of the
+# same selected file) means a user who sees this error and clicks
+# "Analyze swing" again for the SAME upload cannot be double-charged
+# even if the first attempt's success response was merely lost in
+# transit. The swing record itself is already saved above regardless
+# (it's real data the user produced); only the REPORT DISPLAY is gated
+# on the charge succeeding.
+if not record_successful_swing_analysis(_plan_snapshot, idempotency_key=_upload_idempotency_key):
+    st.error(
+        "Your swing was analyzed, but we couldn't record it against your account "
+        "(a temporary connection issue on our end, not something you did wrong). "
+        "Please click “Analyze swing” again to retry -- you will not be "
+        "double-charged for this attempt."
+    )
+    st.stop()
 
 swing_history = load_swing_history(user["slug"])
 
