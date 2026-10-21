@@ -46,6 +46,7 @@ from player_storage import (
 )
 from entitlements import (
     can_analyze_swing,
+    can_analyze_swing_for_account,
     is_pro,
     plan_display_name,
     FREE_SWING_LIMIT,
@@ -4589,7 +4590,11 @@ if not _analyze_clicked:
 # comparison empty. Always re-read fresh on a swing upload — DB hit is
 # cheap and entitlement correctness matters far more than the ~50ms.
 _plan_snapshot = load_my_plan(force_refresh=True)
-_swing_check = can_analyze_swing(_plan_snapshot)
+# BL-008C.20 Deliverable 5: narrowly scoped pilot allowance -- a no-op
+# for every account except the small, explicit, committed allowlist in
+# entitlements.PILOT_ALLOWLIST. See that module for how to approve an
+# account for pilot testing.
+_swing_check = can_analyze_swing_for_account(_plan_snapshot, (user or {}).get("email"))
 if not _swing_check.allowed:
     st.markdown(f"""
 <div style="

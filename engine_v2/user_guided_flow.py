@@ -304,9 +304,27 @@ def decode_and_cleanup(tmp_video_path: str):
     extracted into memory, the raw video bytes on disk serve no further
     purpose and must not linger.
 
+    BL-008C.20 Deliverable 2 (NONNEGOTIABLE, read before touching this
+    function again): a test script once passed a real original
+    recording into this exact function, which deleted it on schedule --
+    correct behavior for its contract, applied to the wrong input. The
+    deletion below now goes through engine_v2.safe_delete.safe_remove,
+    which independently verifies the resolved path is inside an
+    app-owned temp/upload directory before deleting anything, and
+    REFUSES (raising, not silently skipping) any path outside that --
+    including ~/Downloads, ~/Desktop, or any other personal directory.
+    A caller that repeats the BL-008C.19 mistake now gets a loud error
+    instead of a silent deletion.
+
     Returns (frames_or_None, fps_or_None, error_message_or_None). Never
-    raises -- callers (a Streamlit app, a test) get a tuple to check.
+    raises from the decode/pose path -- callers (a Streamlit app, a
+    test) get a tuple to check. The safety guard in `finally` is the one
+    deliberate exception: an unsafe deletion attempt DOES raise, because
+    silently swallowing that specific error is exactly how a future
+    accident like BL-008C.19 would go unnoticed.
     """
+    from engine_v2.safe_delete import safe_remove
+
     try:
         from engine_v2.decode import decode_with_timing
         from engine_v2.pose import extract_landmarks
@@ -319,10 +337,7 @@ def decode_and_cleanup(tmp_video_path: str):
         except Exception as exc:
             return None, None, f"{type(exc).__name__}: {exc}"
     finally:
-        try:
-            os.remove(tmp_video_path)
-        except OSError:
-            pass
+        safe_remove(tmp_video_path)
 
 
 def analyze_uploaded_video(

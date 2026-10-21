@@ -651,6 +651,21 @@ def render_swing_report_page(
     # 1. Masthead
     render_edge_masthead(user, active_page="swing_report")
 
+    # BL-008C.20 Deliverable 6: a visible (not hover-only) disclaimer at
+    # the top of every swing report. The existing MATCH_CAVEAT text
+    # (mlb_match.py, from BL-004C) was previously shown only as an HTML
+    # `title` tooltip on the MLB-match percentage specifically -- easy to
+    # miss, invisible on mobile (no hover), and absent near the Edge
+    # Score itself. Same wording, reused rather than replaced, now
+    # always visible and covering both numbers. Does not change how
+    # either number is computed -- only how it's labeled.
+    try:
+        from mlb_match import MATCH_CAVEAT
+        st.caption(f"⚠️ {MATCH_CAVEAT} Edge Score is likewise an experimental, unvalidated composite, "
+                   "not a measured or certified metric.")
+    except Exception:
+        pass
+
     # 2. Page wrapper
     render_edge_page_wrapper_open()
 

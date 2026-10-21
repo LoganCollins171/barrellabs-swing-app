@@ -219,6 +219,52 @@ def can_analyze_swing(plan_snapshot: Optional[dict]) -> EntitlementResult:
     return EntitlementResult(allowed=True, remaining=remaining)
 
 
+# --------------------------------------------------------------------
+#  BL-008C.20 Deliverable 5 -- narrowly scoped pilot allowance
+# --------------------------------------------------------------------
+# A small, explicit set of account emails get a RAISED lifetime swing
+# limit instead of unlimited/Pro access -- deliberately narrow, never a
+# blanket bypass of the commercial Free-tier wall. Empty until the
+# owner provides the specific account identifier(s) to approve; adding
+# an email here is the ONLY step required to activate it for that
+# account, and the effect is scoped to exactly swing_limit_lifetime for
+# that one email, nothing else (no other Pro capability is granted).
+#
+# Deliberately NOT read from an environment variable or secrets.toml --
+# this is reviewable, committed, auditable code, matching how every
+# other entitlement rule in this file already works, not a hidden
+# runtime toggle.
+PILOT_SWING_LIMIT = 5  # predeclared margin for retries across 5 real recordings
+PILOT_ALLOWLIST: frozenset[str] = frozenset({
+    # "friend@example.com",  # <- owner adds the approved test account's email here
+})
+
+
+def can_analyze_swing_for_account(plan_snapshot: Optional[dict], account_email: Optional[str]) -> EntitlementResult:
+    """Same contract as can_analyze_swing, but checks the narrow pilot
+    allowlist first. Any email NOT in PILOT_ALLOWLIST gets EXACTLY the
+    same behavior as can_analyze_swing -- this function changes nothing
+    for anyone not explicitly approved. A Pro account's email in the
+    allowlist is a no-op (Pro is already unlimited); this only ever
+    raises a Free account's limit, never lowers anything."""
+    normalized = (account_email or "").strip().lower()
+    if normalized and normalized in PILOT_ALLOWLIST:
+        plan_id = _resolve_plan_id(plan_snapshot)
+        if plan_id in PRO_PLANS:
+            return EntitlementResult(allowed=True)  # already unlimited -- allowlist is a no-op here
+        used = int((plan_snapshot or {}).get("free_swings_used") or 0)
+        remaining = max(0, PILOT_SWING_LIMIT - used)
+        if remaining <= 0:
+            return EntitlementResult(
+                allowed=False,
+                reason=f"You\u2019ve used all {PILOT_SWING_LIMIT} of your pilot swing analyses.",
+                upgrade_to=SOLO_PLAN_ID,
+                remaining=0,
+            )
+        return EntitlementResult(allowed=True, remaining=remaining)
+    return can_analyze_swing(plan_snapshot)
+
+
 def _gate_pro_only(
     plan_snapshot: Optional[dict],
     cap_key: str,
