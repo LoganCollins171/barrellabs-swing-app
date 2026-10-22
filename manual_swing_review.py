@@ -128,7 +128,12 @@ def render_manual_swing_review(user: dict | None) -> None:
             st.session_state["manual_review_analysis_session_id"] = uuid.uuid4().hex
 
     frames = st.session_state["manual_review_frames"]
-    fps = st.session_state.get("manual_review_fps", 30.0) or 30.0
+    # BL-008C.32: the clip's real frame rate (from presentation timestamps),
+    # or None when it can't be determined -- never an assumed 30 fps.
+    fps = st.session_state.get("manual_review_fps")
+
+    def _secs(a: int, b: int) -> str:
+        return f" (~{a / fps:.2f}s to ~{b / fps:.2f}s)" if fps else ""
     n = len(frames)
 
     st.subheader("Select the approximate start and end of your swing")
@@ -137,8 +142,7 @@ def render_manual_swing_review(user: dict | None) -> None:
         min_value=0, max_value=max(n - 1, 1), value=(0, max(n - 1, 1)),
         key="manual_review_slider",
     )
-    st.write(f"Selected: frame {start_frame} to {end_frame} "
-             f"(~{start_frame / fps:.2f}s to ~{end_frame / fps:.2f}s)")
+    st.write(f"Selected: frame {start_frame} to {end_frame}{_secs(start_frame, end_frame)}")
 
     current_selection = (start_frame, end_frame)
     if st.session_state.get("manual_review_checked_selection") != current_selection:
@@ -257,8 +261,7 @@ def render_manual_swing_review(user: dict | None) -> None:
             s, e = final_result.resolved_interval
             st.error(f"EXPERIMENTAL, user-confirmed -- not automatically verified: "
                      f"{final_result.experimental_disclaimer}")
-            st.success(f"Analyzed exactly what you selected: frames {s}-{e} "
-                       f"(~{s/fps:.2f}s to ~{e/fps:.2f}s).")
+            st.success(f"Analyzed exactly what you selected: frames {s}-{e}{_secs(s, e)}.")
 
             displayable, internal = [], []
             for m in final_result.result.measurements:

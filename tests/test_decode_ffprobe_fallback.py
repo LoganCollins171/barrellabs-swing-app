@@ -1,10 +1,9 @@
 """BL-008C.28/.32 -- regression tests for a real production failure: a real,
 authenticated test of the Experimental Manual Review pathway on the live
 deployed app crashed decode entirely with
-`FileNotFoundError: [Errno 2] No such file or directory: 'ffprobe'`,
-because Streamlit Cloud's container (packages.txt) never installed ffmpeg.
-engine_v2.decode._ffprobe_declared_fps previously had no fallback at all
-for this. BL-008C.32 additionally routed the call through
+`FileNotFoundError: [Errno 2] No such file or directory: 'ffprobe'`:
+ffprobe was not on the container's PATH, and
+engine_v2.decode._ffprobe_declared_fps had no fallback at all for that. BL-008C.32 additionally routed the call through
 proc_utils.run_subprocess (the same timeout-bounded helper the legacy
 pipeline already uses) and hardened malformed/non-positive-output
 handling. These tests simulate every failure mode directly -- no real

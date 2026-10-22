@@ -29,40 +29,25 @@ _FFPROBE_TIMEOUT_S = 10
 
 
 def _ffprobe_declared_fps(path: str, cap: cv2.VideoCapture | None = None) -> float:
-    """BL-008C.28/.32: this used to be an unconditional, no-fallback,
-    no-timeout `subprocess.run(["ffprobe", ...])` call -- confirmed in a
-    real production test (the owner's own authenticated session,
-    Experimental Manual Review pathway) to surface as
-    `FileNotFoundError: ... 'ffprobe'` when the binary isn't on PATH.
+    """Container-declared frame rate, for the DESCRIPTIVE disagreement signal
+    only (see this module's docstring). Never raises.
 
-    BL-008C.32 root-cause note: this function's own try/except already
-    catches that exact FileNotFoundError and falls back cleanly -- a
-    real local reproduction (ffprobe removed from PATH, same repro as
-    BL-008C.28) confirms decode completes successfully through this
-    exact code. The owner's post-deploy retry showing the identical
-    error is therefore most consistent with that retry having reached a
-    container/session that predated the redeploy fully taking effect,
-    not a residual code defect -- no second, unprotected ffprobe/ffmpeg
-    call site exists anywhere else in this module, manual_swing_review.py,
-    or engine_v2/ (verified by a full-repo search). packages.txt is also
-    fixed in this same change (see that file) so ffmpeg actually
-    installs, removing the need for this fallback to activate at all in
-    the common case.
+    BL-008C.28: this was an unconditional, no-fallback, no-timeout
+    `subprocess.run(["ffprobe", ...])`; with no ffprobe on PATH it surfaced as
+    `FileNotFoundError: ... 'ffprobe'` (the owner's production report, before
+    9cae39c). This is the ONLY ffprobe/ffmpeg invocation in the app, and no
+    installed Python package calls ffprobe (BL-008C.32 audit), so the
+    experimental path needs no external binary at all -- verified end to end
+    through the real review page with ffprobe absent
+    (tests/test_experimental_path_integration.py), which also reproduces the
+    owner's exact error message when the pre-9cae39c version of this function
+    is swapped back in.
 
-    declared_fps is explicitly a DESCRIPTIVE-only value (see this
-    module's docstring: "not proof of anything by itself") -- it is
-    safe to fall back to an approximate value rather than fail the
-    whole decode over it. Now routed through proc_utils.run_subprocess
-    (the same shared, timeout-bounded subprocess helper the legacy
-    pipeline already uses for its own child process -- BL-008C.32's
-    "fix the shared contract" guidance) instead of a second, separate,
-    unbounded subprocess.run call -- so a hung/stuck ffprobe process
-    can no longer block decode indefinitely either. Falls back to
-    OpenCV's own CAP_PROP_FPS (needs no external binary at all) if
-    ffprobe is missing, errors, times out, or returns unparseable/
-    non-positive data, and to 0.0 (the pre-existing "unknown declared
-    fps" sentinel `disagreement_pct` already handles) only if that also
-    fails to produce a usable value. Never raises."""
+    BL-008C.32: routed through proc_utils.run_subprocess (the same
+    timeout-bounded helper the legacy pipeline uses) with a short bound, so a
+    hung ffprobe can't block decode; a non-zero exit, timeout, malformed
+    output or non-positive rate all fall back to OpenCV's CAP_PROP_FPS, then
+    to 0.0 (the existing "unknown" sentinel disagreement_pct handles)."""
     try:
         rc, out, _err = run_subprocess(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",

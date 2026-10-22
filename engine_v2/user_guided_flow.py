@@ -295,6 +295,23 @@ def analyze_user_selection(
     )
 
 
+def _display_fps(timing) -> float | None:
+    """BL-008C.32: the frame rate used to label frame numbers in seconds on
+    the review page. Previously read `timing.fps` -- an attribute
+    FrameTimingReport doesn't have -- so it was ALWAYS a fabricated 30.0
+    (a 54 fps clip's labels were ~1.8x too long). Prefer the rate measured
+    from real presentation timestamps, then the container's declared rate;
+    None when neither is usable, so the page shows frames without inventing
+    seconds. Display-only: measurements are frame/landmark based."""
+    actual = getattr(timing, "actual_avg_fps", 0.0) or 0.0
+    if getattr(timing, "pts_available", False) and 1.0 <= actual <= 1000.0:
+        return float(actual)
+    declared = getattr(timing, "container_declared_fps", 0.0) or 0.0
+    if 1.0 <= declared <= 1000.0:
+        return float(declared)
+    return None
+
+
 def decode_and_cleanup(tmp_video_path: str):
     """BL-008C.15 Deliverable 7 -- decodes+pose-extracts a (typically
     temporary) video file and GUARANTEES the file is deleted afterward,
@@ -331,9 +348,10 @@ def decode_and_cleanup(tmp_video_path: str):
 
         try:
             raw_frames, pts, timing = decode_with_timing(tmp_video_path)
+            if not raw_frames:
+                return None, None, "No video frames could be read from this file."
             lf, tracking = extract_landmarks(raw_frames)
-            fps = timing.fps if hasattr(timing, "fps") and timing.fps else 30.0
-            return lf, fps, None
+            return lf, _display_fps(timing), None
         except Exception as exc:
             return None, None, f"{type(exc).__name__}: {exc}"
     finally:
