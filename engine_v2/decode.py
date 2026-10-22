@@ -9,45 +9,74 @@ disagreement alone as proof of variable-frame-rate capture").
 """
 from __future__ import annotations
 
-import subprocess
 import json as _json
 
 import cv2
 import numpy as np
 
 from engine_v2.types import FrameTimingReport
+from proc_utils import run_subprocess
 
 _DUP_FRAME_DIFF_THRESHOLD = 2.0   # mean abs pixel diff (0-255 scale, downscaled gray) below which frames count as "near-duplicate"
 
+# BL-008C.32: bounds the ffprobe subprocess the same way proc_utils already
+# bounds the pose-detection subprocess (run_subprocess's own DEFAULT_TIMEOUT_S
+# is 180s, sized for pose detection on a slow clip -- ffprobe reading one
+# stream's frame rate needs nowhere near that long on any real clip; a short,
+# separate bound keeps a stuck/hung ffprobe invocation from blocking decode
+# indefinitely without over-bounding the (much heavier) pose step elsewhere).
+_FFPROBE_TIMEOUT_S = 10
+
 
 def _ffprobe_declared_fps(path: str, cap: cv2.VideoCapture | None = None) -> float:
-    """BL-008C.28: this used to be an unconditional, no-fallback
-    subprocess call -- confirmed in a real production test (the owner's
-    own authenticated session, Experimental Manual Review pathway) to
-    hard-crash the entire decode with `FileNotFoundError: ... 'ffprobe'`,
-    because Streamlit Cloud's container (packages.txt) never installed
-    ffmpeg (which provides the ffprobe binary) -- a pre-existing
-    deployment-config gap this engine_v2 pathway had never actually hit
-    in production before that test, since it had only ever run against
-    local dev machines that happen to have ffmpeg installed.
+    """BL-008C.28/.32: this used to be an unconditional, no-fallback,
+    no-timeout `subprocess.run(["ffprobe", ...])` call -- confirmed in a
+    real production test (the owner's own authenticated session,
+    Experimental Manual Review pathway) to surface as
+    `FileNotFoundError: ... 'ffprobe'` when the binary isn't on PATH.
+
+    BL-008C.32 root-cause note: this function's own try/except already
+    catches that exact FileNotFoundError and falls back cleanly -- a
+    real local reproduction (ffprobe removed from PATH, same repro as
+    BL-008C.28) confirms decode completes successfully through this
+    exact code. The owner's post-deploy retry showing the identical
+    error is therefore most consistent with that retry having reached a
+    container/session that predated the redeploy fully taking effect,
+    not a residual code defect -- no second, unprotected ffprobe/ffmpeg
+    call site exists anywhere else in this module, manual_swing_review.py,
+    or engine_v2/ (verified by a full-repo search). packages.txt is also
+    fixed in this same change (see that file) so ffmpeg actually
+    installs, removing the need for this fallback to activate at all in
+    the common case.
 
     declared_fps is explicitly a DESCRIPTIVE-only value (see this
     module's docstring: "not proof of anything by itself") -- it is
     safe to fall back to an approximate value rather than fail the
-    whole decode over it. Falls back to OpenCV's own
-    CAP_PROP_FPS (needs no external binary at all) if ffprobe is
-    missing or errors for any other reason, and to 0.0 (the pre-existing
-    "unknown declared fps" sentinel `disagreement_pct` already handles)
-    only if that also fails to produce a usable value."""
+    whole decode over it. Now routed through proc_utils.run_subprocess
+    (the same shared, timeout-bounded subprocess helper the legacy
+    pipeline already uses for its own child process -- BL-008C.32's
+    "fix the shared contract" guidance) instead of a second, separate,
+    unbounded subprocess.run call -- so a hung/stuck ffprobe process
+    can no longer block decode indefinitely either. Falls back to
+    OpenCV's own CAP_PROP_FPS (needs no external binary at all) if
+    ffprobe is missing, errors, times out, or returns unparseable/
+    non-positive data, and to 0.0 (the pre-existing "unknown declared
+    fps" sentinel `disagreement_pct` already handles) only if that also
+    fails to produce a usable value. Never raises."""
     try:
-        out = subprocess.run(
+        rc, out, _err = run_subprocess(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=r_frame_rate", "-of", "json", path],
-            capture_output=True, text=True, check=True,
+            cwd=".", timeout=_FFPROBE_TIMEOUT_S,
         )
-        data = _json.loads(out.stdout)
+        if rc != 0:
+            raise RuntimeError(f"ffprobe exited {rc}")
+        data = _json.loads(out)
         num, den = data["streams"][0]["r_frame_rate"].split("/")
-        return float(num) / float(den)
+        parsed = float(num) / float(den)
+        if parsed <= 0:
+            raise ValueError("ffprobe reported a non-positive frame rate")
+        return parsed
     except Exception:
         try:
             opencv_fps = (cap or cv2.VideoCapture(path)).get(cv2.CAP_PROP_FPS)
