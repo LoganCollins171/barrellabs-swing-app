@@ -20,15 +20,40 @@ from engine_v2.types import FrameTimingReport
 _DUP_FRAME_DIFF_THRESHOLD = 2.0   # mean abs pixel diff (0-255 scale, downscaled gray) below which frames count as "near-duplicate"
 
 
-def _ffprobe_declared_fps(path: str) -> float:
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=r_frame_rate", "-of", "json", path],
-        capture_output=True, text=True, check=True,
-    )
-    data = _json.loads(out.stdout)
-    num, den = data["streams"][0]["r_frame_rate"].split("/")
-    return float(num) / float(den)
+def _ffprobe_declared_fps(path: str, cap: cv2.VideoCapture | None = None) -> float:
+    """BL-008C.28: this used to be an unconditional, no-fallback
+    subprocess call -- confirmed in a real production test (the owner's
+    own authenticated session, Experimental Manual Review pathway) to
+    hard-crash the entire decode with `FileNotFoundError: ... 'ffprobe'`,
+    because Streamlit Cloud's container (packages.txt) never installed
+    ffmpeg (which provides the ffprobe binary) -- a pre-existing
+    deployment-config gap this engine_v2 pathway had never actually hit
+    in production before that test, since it had only ever run against
+    local dev machines that happen to have ffmpeg installed.
+
+    declared_fps is explicitly a DESCRIPTIVE-only value (see this
+    module's docstring: "not proof of anything by itself") -- it is
+    safe to fall back to an approximate value rather than fail the
+    whole decode over it. Falls back to OpenCV's own
+    CAP_PROP_FPS (needs no external binary at all) if ffprobe is
+    missing or errors for any other reason, and to 0.0 (the pre-existing
+    "unknown declared fps" sentinel `disagreement_pct` already handles)
+    only if that also fails to produce a usable value."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate", "-of", "json", path],
+            capture_output=True, text=True, check=True,
+        )
+        data = _json.loads(out.stdout)
+        num, den = data["streams"][0]["r_frame_rate"].split("/")
+        return float(num) / float(den)
+    except Exception:
+        try:
+            opencv_fps = (cap or cv2.VideoCapture(path)).get(cv2.CAP_PROP_FPS)
+            return float(opencv_fps) if opencv_fps and opencv_fps > 0 else 0.0
+        except Exception:
+            return 0.0
 
 
 def decode_with_timing(path: str, max_frames: int | None = None) -> tuple[list[np.ndarray], list[float], FrameTimingReport]:
