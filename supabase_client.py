@@ -258,6 +258,30 @@ def restore_session_from_cookie() -> bool:
     """Durable login: if there's no in-memory session, try to rebuild one from
     the persisted refresh-token cookie. Returns True if a session was restored.
 
+    BL-008C.32 root-cause note on "logged out whenever refreshing the page":
+    Supabase rotates the refresh token on every successful refresh_session()
+    call and the OLD token becomes single-use/invalid once rotated. The new
+    token only reaches the browser's cookie jar via session_persist's
+    components.html() JS write, which is asynchronous relative to this
+    synchronous server-side call. Two browser sessions presenting the SAME
+    stored cookie value close together (two tabs open at once, a browser
+    restoring multiple tabs after a crash/restart, or a reload that reaches
+    the server before the prior rotation's cookie write has landed) will
+    have exactly one of them win the rotation; the other(s) present an
+    already-consumed refresh token, get rejected here, and fall through to
+    the login screen -- with no password-reset or revocation involved. This
+    matches the reported symptom (logged out on refresh) without requiring
+    any defect in the read/write cookie plumbing itself, which a real local
+    round-trip test (write -> full page reload -> server-side read) already
+    confirmed works correctly. Supabase's own mitigation for this exact race
+    is the GoTrue "refresh token reuse interval" (a brief grace window where
+    an already-rotated token is still honored) -- a project-level Auth
+    setting outside this repo and outside this task's authorization to
+    change. This function cannot safely retry past a reuse-interval
+    rejection (the old token is genuinely dead by then), so the correct
+    client-side behavior is to fail closed to a normal, un-flashed login
+    screen -- which is what happens below -- rather than to retry blindly.
+
     SAFE: any failure returns False and (for a rejected token) drops the cookie,
     so the app cleanly falls back to the auth gate. Never raises.
     """
@@ -270,19 +294,44 @@ def restore_session_from_cookie() -> bool:
         return False
     if not refresh_token:
         return False
+    client = _build_client()
+    session = None
+    # supabase-py's API has shifted across versions (the same reason
+    # _refresh_stored_session already hedges below) -- try the same
+    # signatures here instead of a single hardcoded call shape.
+    for attempt in (
+        lambda: client.auth.refresh_session(refresh_token),
+        lambda: client.auth.refresh_session(refresh_token=refresh_token),
+    ):
+        try:
+            resp = attempt()
+            cand = getattr(resp, "session", None)
+            if cand and getattr(cand, "access_token", None):
+                session = cand
+                break
+        except TypeError:
+            continue
+        except Exception:
+            # Includes the single-use-token-already-rotated case described
+            # above -- not recoverable by retrying this same token, so fall
+            # through to "no session restored" rather than raising.
+            break
+    if not session:
+        # Expired / revoked / already-rotated (single-use) token — drop the
+        # stale cookie so we don't keep retrying a token that's permanently
+        # dead, and fall through to the login screen.
+        try:
+            import session_persist
+            session_persist.clear_refresh_token()
+        except Exception:
+            pass
+        return False
     try:
-        client = _build_client()
-        resp = client.auth.refresh_session(refresh_token)
-        session = getattr(resp, "session", None)
-        if not session or not getattr(session, "access_token", None):
-            return False
         # store_session repopulates st.session_state AND re-writes the cookie
         # with the rotated refresh token, so the next reload works too.
         store_session(session)
         return True
     except Exception:
-        # Expired / revoked / reused token — drop the stale cookie so we don't
-        # keep trying it, and fall through to the login screen.
         try:
             import session_persist
             session_persist.clear_refresh_token()
