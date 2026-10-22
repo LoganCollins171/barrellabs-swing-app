@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>bl session bridge</title></head>
+<body style="margin:0">
+<script>
+/* BL-008C.32 -- durable-login bridge.
+ *
+ * Streamlit Community Cloud's proxy strips almost all request cookies, so the
+ * server's st.context.cookies never sees `bl_session` there (confirmed by
+ * Streamlit staff; reproduced by production Supabase logs showing zero
+ * refresh-token grants). This component reads the cookie IN THE BROWSER and
+ * hands it to the Python side over the app's websocket, and applies the
+ * write/clear the server asks for, then reports what the cookie now holds
+ * (the write acknowledgment).
+ *
+ * Talks to its parent only if the parent is this same origin (the Streamlit
+ * app frame); never posts to "*". No dependencies -- this is the raw
+ * Streamlit component protocol (componentReady / render / setComponentValue).
+ */
+(function () {
+  "use strict";
+  var NAME = "bl_session";
+  var ORIGIN = window.location.origin;
+  var parentOk = false;
+  try { parentOk = window.parent !== window && window.parent.location.origin === ORIGIN; }
+  catch (e) { parentOk = false; }
+  if (!parentOk) return;
+
+  function send(type, extra) {
+    var msg = { isStreamlitMessage: true, type: type };
+    for (var k in extra) msg[k] = extra[k];
+    window.parent.postMessage(msg, ORIGIN);
+  }
+
+  function readCookie() {
+    var parts = document.cookie ? document.cookie.split("; ") : [];
+    for (var i = 0; i < parts.length; i++) {
+      var eq = parts[i].indexOf("=");
+      if (parts[i].substring(0, eq) === NAME) {
+        var v = parts[i].substring(eq + 1);
+        return v ? decodeURIComponent(v) : null;
+      }
+    }
+    return null;
+  }
+
+  function attrs(maxAge) {
+    return "; max-age=" + maxAge + "; path=/; SameSite=Lax" +
+      (location.protocol === "https:" ? "; Secure" : "");
+  }
+
+  // Ops already applied in THIS tab survive an iframe remount (sessionStorage
+  // is per tab), so a remounted bridge can never re-apply an old write over a
+  // newer token another run or tab has written since.
+  var appliedMem = {};
+  function wasApplied(k) {
+    if (appliedMem[k]) return true;
+    try { return window.sessionStorage.getItem(k) === "1"; } catch (e) { return false; }
+  }
+  function markApplied(k) {
+    appliedMem[k] = true;
+    try { window.sessionStorage.setItem(k, "1"); } catch (e) {}
+  }
+
+  window.addEventListener("message", function (ev) {
+    if (ev.origin !== ORIGIN || ev.source !== window.parent) return;
+    var d = ev.data || {};
+    if (d.type !== "streamlit:render") return;
+    var a = d.args || {};
+    var appliedKey = "bl_bridge_applied:" + String(a.nonce) + ":" + String(a.op_id);
+    if (a.op && !wasApplied(appliedKey)) {
+      // Compare-and-set: refresh tokens are single-use and every tab shares
+      // this cookie, so only replace the value the server expects to replace
+      // (expect == null means unconditional: a fresh login or a logout).
+      var cur = readCookie();
+      var expect = (a.expect === undefined) ? null : a.expect;
+      if (a.op === "write" && typeof a.target === "string" && a.target) {
+        if (expect === null || cur === expect || cur === a.target) {
+          document.cookie = NAME + "=" + encodeURIComponent(a.target) + attrs(a.max_age | 0);
+        }
+      } else if (a.op === "clear") {
+        if (expect === null || cur === expect) {
+          document.cookie = NAME + "=" + attrs(0);
+        }
+      }
+      markApplied(appliedKey);
+    }
+    // Report ONLY when the server asked (it is deciding who is signed in).
+    // A report makes Streamlit rerun the script, and a rerun requested while
+    // a long run is in flight (an analysis) cuts that run short.
+    if (a.report !== true) return;
+    var value = { token: readCookie(), op_id: a.op_id | 0, nonce: String(a.nonce) };
+    var serial = JSON.stringify(value);
+    var memo = "bl_bridge_last:" + a.nonce;
+    var last = null;
+    try { last = window.sessionStorage.getItem(memo); } catch (e) {}
+    if (serial !== last) {
+      try { window.sessionStorage.setItem(memo, serial); } catch (e) {}
+      send("streamlit:setComponentValue", { value: value, dataType: "json" });
+    }
+  });
+
+  send("streamlit:componentReady", { apiVersion: 1 });
+  send("streamlit:setFrameHeight", { height: 0 });
+})();
+</script>
+</body>
+</html>

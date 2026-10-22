@@ -36,9 +36,29 @@ except ImportError as exc:
 # --------------------------------------------------------------------
 #  Singleton client
 # --------------------------------------------------------------------
-@st.cache_resource(show_spinner=False)
-def _build_client() -> "Client":
-    """Build the Supabase client once per process."""
+_CLIENT_KEY = "_sb_client"
+
+
+def _diag(name, **fields):
+    try:
+        import auth_diag
+        auth_diag.event(name, **fields)
+    except Exception:
+        pass
+
+RESTORE_ERROR_KEY = "_auth_restore_error"
+REAUTH_KEY = "_bl_reauth_needed"
+
+# Non-identity, non-private UI state that may outlive a logout (see
+# clear_session). Everything else in st.session_state is dropped.
+_SURVIVES_LOGOUT = frozenset({
+    "page", "auth_mode", "sidebar_collapsed", "_legal_return_to",
+    "use_dashboard_v2", "use_dashboard_v3", "_swr_css_loaded", "_fac_logo_h",
+    "_pruned_stale_files",
+})
+
+
+def _new_client() -> "Client":
     cfg = st.secrets["supabase"]
     url = cfg["url"]
     # We support both the new "publishable_key" name and the legacy
@@ -49,7 +69,35 @@ def _build_client() -> "Client":
             "Supabase credentials are missing. Add them to "
             ".streamlit/secrets.toml under [supabase]."
         )
-    return create_client(url, key)
+    # BL-008C.32: auto_refresh_token=False. With it on (the SDK default),
+    # every set_session()/sign-in arms a background Timer that rotates the
+    # refresh token server-side ~1 min before the access token expires --
+    # and re-arms itself forever -- without updating st.session_state or the
+    # browser cookie, which are then holding a revoked token. This app
+    # already refreshes explicitly (get_client -> _refresh_stored_session)
+    # and records every rotation; the hidden timer only creates stale tokens.
+    from supabase import ClientOptions
+    return create_client(
+        url, key,
+        options=ClientOptions(auto_refresh_token=False, persist_session=False),
+    )
+
+
+def _build_client() -> "Client":
+    """One Supabase client per browser session (BL-008C.32).
+
+    Previously @st.cache_resource: ONE client shared by every user of the
+    process, onto which each request planted its own tokens via set_session().
+    Streamlit runs sessions on separate threads, so two users' reruns could
+    interleave between one user's set_session() and their query (running it
+    under the other user's JWT), and clear_session()'s sign_out() revoked
+    whichever user's session happened to be planted last. A per-session
+    client keeps each user's auth state in that user's own session."""
+    client = st.session_state.get(_CLIENT_KEY)
+    if client is None:
+        client = _new_client()
+        st.session_state[_CLIENT_KEY] = client
+    return client
 
 
 def _session_is_expired(session: dict, *, skew_seconds: int = 60) -> bool:
@@ -83,29 +131,65 @@ def _refresh_stored_session(client) -> bool:
     if not refresh_token:
         return False
 
-    new_session = None
-    # supabase-py's API has shifted across versions. Try the most
-    # common signatures in order.
-    for attempt in (
-        lambda: client.auth.refresh_session(refresh_token),
-        lambda: client.auth.refresh_session(refresh_token=refresh_token),
-        lambda: client.auth.refresh_session(),
-    ):
+    def _try(rt):
+        # supabase-py's API has shifted across versions. Try the most
+        # common signatures in order.
+        for attempt in (
+            lambda: client.auth.refresh_session(rt),
+            lambda: client.auth.refresh_session(refresh_token=rt),
+        ):
+            try:
+                resp = attempt()
+                cand = getattr(resp, "session", None) or resp
+                if cand and getattr(cand, "access_token", None):
+                    return cand
+            except TypeError:
+                continue
+            except Exception:
+                return None
+        return None
+
+    new_session = _try(refresh_token)
+    if not new_session:
+        # BL-008C.32: another tab of this browser may have rotated this
+        # session's token since this tab stored it (Supabase refresh tokens
+        # are single-use). The browser's cookie holds the newest one -- try
+        # it, but ONLY if it still belongs to the same user, so a different
+        # account signed in from another tab can never silently take over
+        # this tab's (private) state.
         try:
-            resp = attempt()
-            cand = getattr(resp, "session", None) or resp
-            if cand and getattr(cand, "access_token", None):
-                new_session = cand
-                break
-        except TypeError:
-            continue
+            import session_persist
+            alt = session_persist.browser_token()
         except Exception:
-            continue
+            alt = None
+        if alt and alt != refresh_token:
+            cand = _try(alt)
+            cand_uid = getattr(getattr(cand, "user", None), "id", None)
+            if cand and cand_uid and cand_uid == session.get("user_id"):
+                new_session = cand
+                refresh_token = alt
 
     if not new_session:
+        _diag("token_refresh", ok=False)
+        try:
+            import session_persist
+            session_persist.note_rejected(refresh_token)
+        except Exception:
+            pass
         st.session_state.pop("supabase_session", None)
         st.session_state.pop("auth_user", None)
+        # BL-008C.32: re-run the auth gate at the top of the next run (not
+        # mid-page): it re-reads the browser's saved login, which another tab
+        # may have rotated to a newer valid token, and shows the login form
+        # only if there is none.
+        st.session_state[REAUTH_KEY] = True
+        # Go there now rather than finishing this run on a dead session.
+        # (A no-op inside callbacks; the flag is handled on the next run.)
+        _rerun = getattr(st, "rerun", None)
+        if callable(_rerun):
+            _rerun()
         return False
+    _diag("token_refresh", ok=True)
 
     user_obj = getattr(new_session, "user", None)
     st.session_state["supabase_session"] = {
@@ -120,7 +204,8 @@ def _refresh_stored_session(client) -> bool:
     try:
         import session_persist
         session_persist.write_refresh_token(
-            st.session_state["supabase_session"].get("refresh_token"))
+            st.session_state["supabase_session"].get("refresh_token"),
+            expect=refresh_token)
     except Exception:
         pass
     # Invalidate the cached auth_user so the next get_current_user()
@@ -184,7 +269,7 @@ def get_client() -> "Client":
 # --------------------------------------------------------------------
 #  Session helpers
 # --------------------------------------------------------------------
-def store_session(session_obj):
+def store_session(session_obj, expect=None):
     """Persist a Supabase Session (returned from sign_in / sign_up)
     into st.session_state so subsequent reruns stay logged in."""
     if not session_obj:
@@ -196,12 +281,16 @@ def store_session(session_obj):
         "user_id":       getattr(session_obj.user, "id", None) if getattr(session_obj, "user", None) else None,
         "email":         getattr(session_obj.user, "email", None) if getattr(session_obj, "user", None) else None,
     }
+    _diag("session_stored")
     # Durable login: persist the refresh token to a browser cookie so a reload
     # or a new tab (e.g. returning from Stripe) keeps the user signed in.
     # Best-effort — never let cookie persistence break the in-memory session.
     try:
         import session_persist
-        session_persist.write_refresh_token(getattr(session_obj, "refresh_token", None))
+        # expect: the token this session was restored/rotated from (a
+        # compare-and-set write, see session_persist); None for a fresh login.
+        session_persist.write_refresh_token(getattr(session_obj, "refresh_token", None),
+                                            expect=expect)
     except Exception:
         pass
 
@@ -210,13 +299,37 @@ def clear_session():
     """Sign the user out — drop their tokens AND every per-identity cache so a
     second login on a shared device (a family iPad) never inherits the prior
     user's profile, plan, or swing-usage snapshot."""
-    for _k in ("supabase_session", "player", "user", "auth_user",
-               "_session_expired", "_profile_picked"):
-        st.session_state.pop(_k, None)
-    # Plan / entitlement snapshot caches (any _my_plan* key).
-    for _k in [k for k in list(st.session_state.keys())
-               if str(k).startswith("_my_plan")]:
-        st.session_state.pop(_k, None)
+    # BL-008C.32: revoke THIS browser's session server-side first, using this
+    # user's own access token (get_client() refreshes it if it has expired).
+    # Once revoked, the refresh token in the cookie is dead even if the
+    # cookie-clear instruction below never reaches the browser, so logout
+    # can't be undone by a reload. scope="local" ends this device's session
+    # only; the user's other devices stay signed in.
+    _revoked = False
+    try:
+        if st.session_state.get("supabase_session"):
+            _client = get_client()
+            _at = (st.session_state.get("supabase_session") or {}).get("access_token")
+            if _at:
+                _client.auth.admin.sign_out(_at, "local")
+                _revoked = True
+    except Exception:
+        pass
+    _diag("logout", revoked=_revoked)
+    # BL-008C.32: wipe EVERYTHING except an explicit allowlist of non-private
+    # UI preferences. The old denylist (tokens, profile, _my_plan*) missed
+    # private analysis state -- manual_review_frames / _final_result /
+    # _check_result, view_swing_record, player_settings_extras, upload state
+    # -- so the next person to sign in on the same tab inherited the previous
+    # user's in-progress experimental review. An allowlist can't silently miss
+    # a key added later.
+    for _k in list(st.session_state.keys()):
+        if str(_k) in _SURVIVES_LOGOUT:
+            continue
+        try:
+            st.session_state.pop(_k, None)
+        except Exception:
+            pass
     # Durable login: drop the persisted cookie so the next load doesn't silently
     # sign them back in.
     try:
@@ -224,10 +337,30 @@ def clear_session():
         session_persist.clear_refresh_token()
     except Exception:
         pass
+
+
+
+
+def reset_local_session():
+    """BL-008C.32: forget this browser tab's identity and private state
+    WITHOUT revoking anything or touching the saved-login cookie. For a
+    session that died on its own (token rejected, revoked elsewhere) -- as
+    opposed to an explicit logout (clear_session). The cookie may hold a
+    NEWER valid login written by another tab; the auth gate re-tries it on
+    the next run, and only that restore (which knows the cookie's own token
+    was rejected) clears it."""
     try:
-        _build_client().auth.sign_out()
+        from session_persist import BRIDGE_READ_KEYS as _keep
     except Exception:
-        pass
+        _keep = frozenset()
+    for _k in list(st.session_state.keys()):
+        if str(_k) in _SURVIVES_LOGOUT or str(_k) in _keep:
+            continue
+        try:
+            st.session_state.pop(_k, None)
+        except Exception:
+            pass
+    _diag("local_session_reset")
 
 
 def _is_auth_error(exc: Exception) -> bool:
@@ -258,29 +391,14 @@ def restore_session_from_cookie() -> bool:
     """Durable login: if there's no in-memory session, try to rebuild one from
     the persisted refresh-token cookie. Returns True if a session was restored.
 
-    BL-008C.32 root-cause note on "logged out whenever refreshing the page":
-    Supabase rotates the refresh token on every successful refresh_session()
-    call and the OLD token becomes single-use/invalid once rotated. The new
-    token only reaches the browser's cookie jar via session_persist's
-    components.html() JS write, which is asynchronous relative to this
-    synchronous server-side call. Two browser sessions presenting the SAME
-    stored cookie value close together (two tabs open at once, a browser
-    restoring multiple tabs after a crash/restart, or a reload that reaches
-    the server before the prior rotation's cookie write has landed) will
-    have exactly one of them win the rotation; the other(s) present an
-    already-consumed refresh token, get rejected here, and fall through to
-    the login screen -- with no password-reset or revocation involved. This
-    matches the reported symptom (logged out on refresh) without requiring
-    any defect in the read/write cookie plumbing itself, which a real local
-    round-trip test (write -> full page reload -> server-side read) already
-    confirmed works correctly. Supabase's own mitigation for this exact race
-    is the GoTrue "refresh token reuse interval" (a brief grace window where
-    an already-rotated token is still honored) -- a project-level Auth
-    setting outside this repo and outside this task's authorization to
-    change. This function cannot safely retry past a reuse-interval
-    rejection (the old token is genuinely dead by then), so the correct
-    client-side behavior is to fail closed to a normal, un-flashed login
-    screen -- which is what happens below -- rather than to retry blindly.
+    The ordinary-refresh logout was NOT a failure in here: the cookie never
+    reached the browser (see session_persist's _TARGET_KEY note), so this
+    returned False at "no refresh token" on every reload. Production
+    evidence: zero refresh_token grants in Supabase's logs across five
+    owner logins on 2026-10-22. A rejected token (expired, revoked by
+    logout, or already rotated by a concurrent tab past Supabase's reuse
+    interval) still fails closed here: the dead cookie is cleared and the
+    normal login screen shows.
 
     SAFE: any failure returns False and (for a rejected token) drops the cookie,
     so the app cleanly falls back to the auth gate. Never raises.
@@ -292,52 +410,45 @@ def restore_session_from_cookie() -> bool:
         refresh_token = session_persist.read_refresh_token()
     except Exception:
         return False
+    _diag("restore_attempt", cookie_present=bool(refresh_token))
     if not refresh_token:
         return False
-    client = _build_client()
-    session = None
-    # supabase-py's API has shifted across versions (the same reason
-    # _refresh_stored_session already hedges below) -- try the same
-    # signatures here instead of a single hardcoded call shape.
-    for attempt in (
-        lambda: client.auth.refresh_session(refresh_token),
-        lambda: client.auth.refresh_session(refresh_token=refresh_token),
-    ):
-        try:
-            resp = attempt()
-            cand = getattr(resp, "session", None)
-            if cand and getattr(cand, "access_token", None):
-                session = cand
-                break
-        except TypeError:
-            continue
-        except Exception:
-            # Includes the single-use-token-already-rotated case described
-            # above -- not recoverable by retrying this same token, so fall
-            # through to "no session restored" rather than raising.
-            break
-    if not session:
-        # Expired / revoked / already-rotated (single-use) token — drop the
-        # stale cookie so we don't keep retrying a token that's permanently
-        # dead, and fall through to the login screen.
-        try:
-            import session_persist
-            session_persist.clear_refresh_token()
-        except Exception:
-            pass
-        return False
+    st.session_state.pop(RESTORE_ERROR_KEY, None)
     try:
-        # store_session repopulates st.session_state AND re-writes the cookie
-        # with the rotated refresh token, so the next reload works too.
-        store_session(session)
-        return True
-    except Exception:
+        client = _build_client()
         try:
-            import session_persist
-            session_persist.clear_refresh_token()
-        except Exception:
-            pass
+            resp = client.auth.refresh_session(refresh_token)
+        except TypeError:
+            # supabase-py's API has shifted across versions (the same reason
+            # _refresh_stored_session hedges); 2.30 takes it positionally.
+            resp = client.auth.refresh_session(refresh_token=refresh_token)
+        session = getattr(resp, "session", None)
+        if not session or not getattr(session, "access_token", None):
+            raise RuntimeError("invalid refresh token: no session returned")
+    except Exception as exc:
+        _diag("restore_result", restored=False, rejected=_is_auth_error(exc))
+        if _is_auth_error(exc):
+            # Expired / revoked / already-rotated token: permanently dead, so
+            # drop it from the cookie -- but only if the cookie still holds
+            # THIS token (another tab may have written a newer one), and never
+            # retry it in this browser session.
+            try:
+                import session_persist
+                session_persist.note_rejected(refresh_token)
+                session_persist.clear_refresh_token(expect=refresh_token)
+            except Exception:
+                pass
+        else:
+            # Network / 5xx: the cookie may still be perfectly valid. Keep it,
+            # and let the auth gate say sign-in couldn't be checked instead of
+            # silently presenting an ordinary logged-out screen.
+            st.session_state[RESTORE_ERROR_KEY] = True
         return False
+    # store_session repopulates st.session_state AND records the rotated
+    # refresh token for the cookie (the old one is now single-use-spent).
+    store_session(session, expect=refresh_token)
+    _diag("restore_result", restored=True)
+    return True
 
 
 def get_current_user():
@@ -375,8 +486,11 @@ def get_current_user():
         return user
     except Exception as exc:
         if _is_auth_error(exc):
-            # Real auth failure — purge and bounce them back to login.
-            clear_session()
+            # Real auth failure — purge and bounce them back to the gate.
+            # BL-008C.32: reset, not clear_session(): this session is already
+            # dead server-side, and the saved-login cookie may now belong to a
+            # newer login from another tab -- the gate decides.
+            reset_local_session()
             return None
         # Transient (network/5xx/etc): keep the session intact and
         # return whatever's cached. Worst case the user sees one stale

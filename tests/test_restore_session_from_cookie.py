@@ -1,12 +1,12 @@
-"""BL-008C.32 -- regression tests for the reported "logged out whenever
-refreshing the page" bug. The real cookie read/write plumbing was verified
-separately with a real local browser round-trip (write -> full page reload
--> server-side st.context.cookies read); these tests isolate the higher
-layer: restore_session_from_cookie()'s handling of the Supabase
-refresh_session() call, including the already-rotated/single-use-token
-race this task's investigation identified as the most likely real-world
-cause (two sessions presenting the same stored cookie value -- two open
-tabs, or a reload racing the previous rotation's async cookie write)."""
+"""BL-008C.32 -- restore_session_from_cookie()'s handling of the Supabase
+refresh_session() call (mocked; no network). NOTE: an earlier version of this
+docstring named a multi-tab refresh-token rotation race as the likely cause of
+"logged out on every refresh". Production evidence disproved that: Supabase's
+logs show zero refresh_token grants across the owner's logins, i.e. the
+restore never ran, because Streamlit Community Cloud's proxy strips request
+cookies before st.context.cookies sees them (fixed by the browser bridge in
+session_persist; see tests/test_auth_persistence_bl008c32.py). The race is a
+real but separate case and is still covered here and there."""
 from __future__ import annotations
 
 import sys
@@ -51,8 +51,9 @@ class _FakeResp:
 def _fake_session_persist(monkeypatch, sc, stored_token="stored-rt"):
     sp_stub = types.SimpleNamespace(
         read_refresh_token=lambda: stored_token,
-        write_refresh_token=lambda _t: None,
-        clear_refresh_token=lambda: None,
+        write_refresh_token=lambda _t, expect=None: None,
+        clear_refresh_token=lambda expect=None: None,
+        note_rejected=lambda _t: None,
     )
     monkeypatch.setitem(sys.modules, "session_persist", sp_stub)
     return sp_stub
@@ -93,16 +94,13 @@ def test_successful_refresh_restores_session_and_rewrites_cookie(monkeypatch):
 
 
 def test_already_rotated_single_use_token_fails_closed_to_login(monkeypatch):
-    """BL-008C.32 root cause: a stored refresh token that was already
-    consumed by a different session's rotation (e.g. a second open tab, or
-    a reload that beat the prior rotation's cookie write) must be rejected
-    -- Supabase itself raises for a reused single-use token. This must NOT
-    raise out of restore_session_from_cookie(); it must cleanly fail
-    closed so the app shows the ordinary login screen, not a crash."""
+    """A stored refresh token already consumed by another rotation (e.g. a
+    second open tab) is rejected by Supabase. That must not raise out of
+    restore_session_from_cookie(); it must fail closed to the login gate."""
     sc, ss = _install(monkeypatch)
     sp_stub = _fake_session_persist(monkeypatch, sc, stored_token="already-rotated-rt")
     cleared = []
-    sp_stub.clear_refresh_token = lambda: cleared.append(True)
+    sp_stub.clear_refresh_token = lambda expect=None: cleared.append(expect or True)
 
     def _boom(refresh_token):
         raise Exception("invalid_grant: refresh_token_already_used")
@@ -111,7 +109,8 @@ def test_already_rotated_single_use_token_fails_closed_to_login(monkeypatch):
 
     assert sc.restore_session_from_cookie() is False
     assert "supabase_session" not in ss
-    assert cleared == [True], "the dead cookie must be dropped, not retried forever"
+    assert cleared == ["already-rotated-rt"], \
+        "the dead token must be dropped from the cookie -- only if the cookie still holds it"
 
 
 def test_keyword_signature_fallback_is_tried(monkeypatch):
@@ -140,7 +139,7 @@ def test_malformed_response_with_no_usable_session_fails_closed(monkeypatch):
     sc, ss = _install(monkeypatch)
     sp_stub = _fake_session_persist(monkeypatch, sc)
     cleared = []
-    sp_stub.clear_refresh_token = lambda: cleared.append(True)
+    sp_stub.clear_refresh_token = lambda expect=None: cleared.append(expect or True)
     client = types.SimpleNamespace(
         auth=types.SimpleNamespace(refresh_session=lambda refresh_token: _FakeResp(None)))
     monkeypatch.setattr(sc, "_build_client", lambda: client)

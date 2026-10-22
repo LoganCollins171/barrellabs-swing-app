@@ -194,3 +194,49 @@ def test_whole_clip_with_several_movements_is_blocked_and_free(original_hash, no
     assert not [b for b in at.button if b.label == "Analyze this selection"]
     assert billing["charges"] == []
 
+
+APP_WITH_AUTH_EVENTS = '''
+import streamlit as st
+import supabase_client
+if st.session_state.pop("_e2e_logout", False):
+    supabase_client.clear_session()
+if st.session_state.pop("_e2e_dead_session", False):
+    supabase_client.reset_local_session()
+import manual_swing_review as msr
+msr.render_manual_swing_review({"slug": "e2e-player", "email": "e2e@example.test"})
+'''
+
+
+@pytest.mark.parametrize("event", ["_e2e_logout", "_e2e_dead_session"])
+def test_logout_or_dead_session_wipes_experimental_state_without_charging(
+        event, original_hash, no_ffprobe, billing, monkeypatch):
+    """Workstream C: a private experimental result must not survive a logout
+    or a dead-session reset (the next person on this tab may be someone else),
+    and neither event may charge anything."""
+    import types
+    import supabase_client
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setattr(supabase_client, "_build_client", lambda: types.SimpleNamespace(
+        auth=types.SimpleNamespace(set_session=lambda *a: None,
+                                   admin=types.SimpleNamespace(sign_out=lambda *a: None))))
+    video = _staged_copy(".mp4")
+    at = AppTest.from_string(APP_WITH_AUTH_EVENTS, default_timeout=180)
+    at.session_state["manual_review_video_path"] = str(video)
+    at.session_state["supabase_session"] = {"access_token": "a", "refresh_token": "r", "user_id": "u1"}
+    at.run()
+    at.slider(key="manual_review_slider").set_value((25, 55)).run()
+    _button(at, "Check this selection").click().run()
+    at.checkbox(key="manual_review_confirm_checkbox").check().run()
+    _button(at, "Analyze this selection").click().run()
+    assert "Analyzed exactly what you selected" in _texts(at)
+    assert len(billing["charges"]) == 1
+
+    at.session_state[event] = True
+    at.run()
+    for private in ("manual_review_frames", "manual_review_final_result",
+                    "manual_review_check_result", "manual_review_analysis_session_id",
+                    "supabase_session"):
+        assert private not in at.session_state, f"{private} survived {event}"
+    assert "Analyzed exactly what you selected" not in _texts(at)
+    assert "No video is ready" in "\n".join(w.value for w in at.warning)
+    assert len(billing["charges"]) == 1, "auth events must never charge"

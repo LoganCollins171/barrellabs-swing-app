@@ -1138,6 +1138,27 @@ if st.session_state.pop("recovery_link_error", False):
 # On every Streamlit rerun, try to restore the user's profile from the
 # active Supabase session. This means a refresh / hot-reload doesn't
 # bounce a logged-in user back to the login screen.
+#
+# BL-008C.32: the durable-login bridge renders on EVERY run, here, before the
+# gate. It applies any pending cookie write/clear, and while no one is signed
+# in it reads the saved-login cookie in the browser and reports it back
+# (Community Cloud's proxy strips cookies, so the server can't read them).
+# Fixed position so its iframe isn't remounted.
+try:
+    import session_persist as _session_persist
+    _session_persist.bridge()
+except Exception:
+    _session_persist = None
+# A session that died mid-run (its refresh token was rejected -- e.g. another
+# tab rotated it) is reset HERE, at the top of the next run, so the gate below
+# re-reads the browser's current saved login instead of leaving a signed-in
+# looking page with no session behind it.
+if st.session_state.get("_bl_reauth_needed"):
+    try:
+        from supabase_client import reset_local_session as _reset_local
+        _reset_local()
+    except Exception:
+        st.session_state.pop("_bl_reauth_needed", None)
 if "user" not in st.session_state:
     # Durable login: a full reload / new tab has an empty in-memory session, so
     # first try to rebuild it from the persisted refresh-token cookie. Safe
@@ -1155,6 +1176,36 @@ if "user" not in st.session_state:
             st.session_state.user = _restored
     except Exception:
         pass
+
+    try:
+        import auth_diag as _auth_diag
+        _auth_diag.event("auth_gate", authenticated="user" in st.session_state,
+                         restore_error=bool(st.session_state.get("_auth_restore_error")))
+    except Exception:
+        pass
+
+# BL-008C.32: while the browser hasn't reported yet whether it holds a saved
+# login, show a neutral "restoring" state -- never the login form (which
+# would flash for a signed-in user) and never app content. The bridge reports
+# within one round trip; the button keeps a user with JS/iframes blocked
+# from being stuck here.
+if "user" not in st.session_state and _session_persist is not None \
+        and _session_persist.restore_pending():
+    if _session_persist.deliver_now():
+        st.rerun()
+    st.markdown(
+        "<div style='max-width:420px;margin:22vh auto 0;text-align:center;"
+        "font-family:system-ui,sans-serif;color:#C8C4BB;'>"
+        "<div style='font-size:1.05rem;'>Signing you back in&hellip;</div></div>",
+        unsafe_allow_html=True,
+    )
+    _rc1, _rc2, _rc3 = st.columns([1, 1, 1])
+    with _rc2:
+        if st.button("Sign in instead", key="_bl_restore_skip_btn",
+                     width="stretch"):
+            _session_persist.skip_restore()
+            st.rerun()
+    st.stop()
 
 # A successful-checkout redirect can land in a FRESH browser tab (auth is
 # session-only), so the user isn't signed in here — don't dump them at a raw
@@ -1211,6 +1262,12 @@ if "user" not in st.session_state and _qp.get("checkout") == "success":
     st.stop()
 
 if "user" not in st.session_state:
+    # BL-008C.32: a saved sign-in that couldn't be checked (network / Supabase
+    # outage) is not the same as being signed out -- the cookie was kept, so
+    # say so rather than silently presenting a plain login screen.
+    if st.session_state.pop("_auth_restore_error", False):
+        st.warning("We couldn't reach the sign-in service to restore your session. "
+                   "Reload the page in a moment, or sign in below.")
     render_auth_screen()
     st.stop()
 
@@ -1365,10 +1422,12 @@ if st.session_state.get("_session_expired"):
     if se_cols[0].button("Log back in", type="primary",
                          width="stretch", key="session_expired_relogin"):
         # Hard reset: clear local session state and let the auth gate
-        # re-render on the next run.
+        # re-render on the next run. BL-008C.32: reset, not clear_session --
+        # the gate silently restores from the browser's saved login if another
+        # tab holds a newer valid one, and shows the login form otherwise.
         try:
-            from supabase_client import clear_session as _clear_sess
-            _clear_sess()
+            from supabase_client import reset_local_session as _reset_sess
+            _reset_sess()
         except Exception:
             pass
         for _k in ("user", "player", "_profile_picked", "_action",
