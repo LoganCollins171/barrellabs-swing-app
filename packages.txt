@@ -1,3 +1,9 @@
 libgl1
 libglib2.0-0
+# BL-008C.28: provides the `ffprobe` binary engine_v2/decode.py uses for a
+# descriptive declared-fps check -- confirmed MISSING in production via a
+# real test (FileNotFoundError: 'ffprobe'). The code itself is now also
+# made resilient to this binary being absent (see decode.py), so this line
+# is defense-in-depth, not the only fix -- but it's the one that gets the
+# real ffprobe value back instead of the OpenCV-approximated fallback.
 ffmpeg
