@@ -12,32 +12,26 @@ import inspect
 
 
 def test_video_path_guard_is_scoped_inside_the_frames_cache_check():
-    """Structural regression test for the exact bug this session found
-    live: `if not video_path...` must be nested inside
-    `if "manual_review_frames" not in st.session_state`, never a
-    sibling check that runs unconditionally on every rerun."""
+    """Structural regression test for the bug BL-008C.19 found live: the
+    "is there a video to prepare" check must only run while frames aren't
+    prepared yet, or every later rerun (any marker move, any button) would
+    bail out even though the work is done. BL-008C.36 moved preparation
+    into _prepare_clip(); it must be reached ONLY through the
+    `"manual_review_frames" not in st.session_state` guard."""
     import manual_swing_review as mod
-    source = inspect.getsource(mod.render_manual_swing_review)
-    tree = ast.parse(source)
-
-    func = tree.body[0]
-    assert isinstance(func, ast.FunctionDef)
-
-    # Find the top-level "if 'manual_review_frames' not in st.session_state"
-    # guard and confirm the video_path-missing check is NESTED inside it,
-    # not a sibling at the same indentation level.
-    found_frames_guard = False
-    for node in ast.walk(func):
+    body = ast.parse(inspect.getsource(mod._render_body)).body[0]
+    guarded_calls = []
+    for node in ast.walk(body):
         if isinstance(node, ast.If):
-            src = ast.unparse(node.test) if hasattr(ast, "unparse") else ""
-            if "manual_review_frames" in src and "not in" in src:
-                found_frames_guard = True
-                inner_source = ast.unparse(node)
-                assert "video_path" in inner_source, (
-                    "the video_path-missing check must be nested inside the "
-                    "frames-not-cached guard, not run unconditionally on every rerun"
-                )
-    assert found_frames_guard, "expected a 'manual_review_frames not in session_state' guard"
+            test = ast.unparse(node.test)
+            if "manual_review_frames" in test and "not in" in test:
+                guarded_calls += [ast.unparse(n) for n in ast.walk(node) if isinstance(n, ast.Call)]
+    assert any("_prepare_clip" in c for c in guarded_calls), \
+        "_prepare_clip must only be called inside the frames-not-prepared guard"
+    all_calls = [ast.unparse(n) for n in ast.walk(body) if isinstance(n, ast.Call)]
+    assert sum("_prepare_clip" in c for c in all_calls) == sum("_prepare_clip" in c for c in guarded_calls)
+    prep_src = inspect.getsource(mod._prepare_clip)
+    assert "manual_review_video_path" in prep_src and "os.path.isfile" in prep_src
 
 
 def test_module_imports_cleanly():

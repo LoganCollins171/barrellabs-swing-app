@@ -113,6 +113,8 @@ def _real_streamlit_auth_modules(monkeypatch):
     import sys
     for name in ("supabase_client", "session_persist", "auth_diag"):
         monkeypatch.delitem(sys.modules, name, raising=False)
+    from tests._stub_isolation import drop_stub_bound_modules
+    drop_stub_bound_modules(monkeypatch)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -144,7 +146,11 @@ def test_full_experimental_flow_without_ffprobe(suffix, original_hash, no_ffprob
 
     out = _texts(at)
     assert "Analyzed exactly what you selected: frames 25-55" in out
-    assert f"~{25 / fps:.2f}s" in out and "~0.83s" not in out, "seconds must use the real fps"
+    # BL-008C.36: labels are each frame's REAL timestamp (this clip has uneven
+    # frame timing, so frame/avg-fps would be off), never an assumed 30 fps.
+    pts = at.session_state["manual_review_pts"]
+    assert f"~{pts[25]:.2f}s to ~{pts[55]:.2f}s" in out
+    assert "~0.83s" not in out, "never the fabricated-30-fps label"
     assert "EXPERIMENTAL" in out and "not automatically verified" in out
     assert len(billing["charges"]) == 1, "a successful experimental analysis charges exactly once"
 

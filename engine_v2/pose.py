@@ -27,7 +27,9 @@ _LANDMARK_NAMES = [
 ]
 
 
-def extract_landmarks(frames: list[np.ndarray]) -> tuple[list[LandmarkFrame], TrackingQualityReport]:
+def extract_landmarks(frames: list[np.ndarray], on_progress=None) -> tuple[list[LandmarkFrame], TrackingQualityReport]:
+    """`on_progress(done, total)`, if given, is called after each frame
+    (BL-008C.36: lets the review page show real progress)."""
     import cv2
     import mediapipe as mp
 
@@ -73,6 +75,8 @@ def extract_landmarks(frames: list[np.ndarray]) -> tuple[list[LandmarkFrame], Tr
             if had_pose_prev is True and has_pose is False:
                 continuity_breaks += 1
             had_pose_prev = has_pose
+            if on_progress is not None:
+                on_progress(idx + 1, len(frames))
     finally:
         pose.close()
 

@@ -1193,7 +1193,13 @@ if "user" not in st.session_state and _session_persist is not None \
         and _session_persist.restore_pending():
     if _session_persist.deliver_now():
         st.rerun()
+    # BL-008C.36: this screen renders before the app theme is injected, so
+    # it carries its own dark background -- it used to be light-grey text on
+    # Streamlit's default WHITE page, i.e. it looked like a blank white
+    # screen (e.g. after a dropped connection reconnects into a new session).
     st.markdown(
+        "<style>[data-testid='stAppViewContainer'],[data-testid='stApp'],"
+        "[data-testid='stHeader']{background:#0A0B0E !important;}</style>"
         "<div style='max-width:420px;margin:22vh auto 0;text-align:center;"
         "font-family:system-ui,sans-serif;color:#C8C4BB;'>"
         "<div style='font-size:1.05rem;'>Signing you back in&hellip;</div></div>",
@@ -3033,6 +3039,7 @@ _pages_with_own_hero = {
     "billing",
     "launch_progress",
     "player_settings",
+    "manual_review",   # BL-008C.36: renders its own masthead; the upload hero used to stack above it
 }
 if (
     not _viewing_saved_swing
@@ -4659,8 +4666,11 @@ with _manual_col:
     if st.button("Select & confirm manually (experimental)", width="stretch",
                  key="manual_review_btn", help="Pick the exact swing interval yourself if automatic "
                                                 "analysis seems off."):
+        # BL-008C.36: a new clip starts a clean review -- no frames, checks,
+        # results or selections from a previous clip can carry over.
+        for _k in [k for k in list(st.session_state.keys()) if str(k).startswith("manual_review_")]:
+            st.session_state.pop(_k, None)
         st.session_state["manual_review_video_path"] = str(video_path)
-        st.session_state.pop("manual_review_frames", None)
         st.session_state["page"] = "manual_review"
         st.rerun()
 

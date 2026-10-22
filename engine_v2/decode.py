@@ -101,10 +101,8 @@ def decode_with_timing(path: str, max_frames: int | None = None) -> tuple[list[n
         frames.append(frame)
 
         small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (160, 90))
-        if prev_gray_small is not None:
-            diff = float(np.mean(np.abs(small.astype(np.int16) - prev_gray_small.astype(np.int16))))
-            if diff < _DUP_FRAME_DIFF_THRESHOLD:
-                dup_count += 1
+        if is_near_duplicate(small, prev_gray_small):
+            dup_count += 1
         prev_gray_small = small
 
         i += 1
@@ -113,7 +111,25 @@ def decode_with_timing(path: str, max_frames: int | None = None) -> tuple[list[n
             break
     cap.release()
 
-    frame_count = len(frames)
+    report = build_timing_report(declared_fps, pts, dup_count, notes)
+    return frames, pts, report
+
+
+def is_near_duplicate(small_gray: np.ndarray, prev_small_gray: np.ndarray | None) -> bool:
+    """Near-duplicate test on 160x90 grayscale thumbnails (shared by every
+    decoder in engine_v2 so they all count duplicates the same way)."""
+    if prev_small_gray is None:
+        return False
+    diff = float(np.mean(np.abs(small_gray.astype(np.int16) - prev_small_gray.astype(np.int16))))
+    return diff < _DUP_FRAME_DIFF_THRESHOLD
+
+
+def build_timing_report(declared_fps: float, pts: list[float], dup_count: int,
+                        notes: list[str] | None = None) -> FrameTimingReport:
+    """BL-008C.36: the FrameTimingReport math, shared by decode_with_timing
+    and engine_v2.review_prep so both describe a clip's timing identically."""
+    notes = list(notes or [])
+    frame_count = len(pts)
     duration_s = (pts[-1] - pts[0]) if len(pts) >= 2 else 0.0
     actual_avg_fps = (frame_count - 1) / duration_s if duration_s > 0 else 0.0
     disagreement_pct = (
@@ -145,4 +161,4 @@ def decode_with_timing(path: str, max_frames: int | None = None) -> tuple[list[n
         original_capture_rate_known=False,  # never assumed true; set by caller only with independent evidence
         notes=notes,
     )
-    return frames, pts, report
+    return report

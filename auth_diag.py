@@ -43,3 +43,20 @@ def event(name: str, **fields) -> None:
         _log.info("auth_event=%s sid=%s %s", name, sid, _safe(fields))
     except Exception:
         pass
+
+
+_perf_log = logging.getLogger("barrellabs.perf")
+if not _perf_log.handlers:
+    _ph = logging.StreamHandler(sys.stderr)
+    _ph.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+    _perf_log.addHandler(_ph)
+    _perf_log.setLevel(logging.INFO)
+    _perf_log.propagate = False
+
+
+def perf(name: str, **fields) -> None:
+    """BL-008C.36: non-secret timing events (same bool/int/None-only rule)."""
+    try:
+        _perf_log.info("perf_event=%s %s", name, _safe(fields))
+    except Exception:
+        pass

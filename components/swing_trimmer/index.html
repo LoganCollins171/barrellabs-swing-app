@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BarrelLabs swing trimmer</title>
+<style>
+  :root {
+    --ink: #0A0B0E; --s1: #121419; --s2: #191C22; --line: rgba(255,255,255,.09);
+    --text: #F4EFE6; --muted: #9A968E; --gold: #E8C170; --red: #FF3B30; --green: #4ADE80;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: transparent; color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif; }
+  .wrap { display: flex; flex-direction: column; gap: 12px; padding: 2px; }
+  .stage { position: relative; background: #000; border: 1px solid var(--line); border-radius: 14px;
+    overflow: hidden; display: flex; justify-content: center; align-items: center; }
+  canvas#view { display: block; }
+  .badge { position: absolute; top: 10px; left: 10px; background: rgba(10,11,14,.78); border: 1px solid var(--line);
+    border-radius: 999px; padding: 4px 10px; font: 600 11px/1.2 ui-monospace, "JetBrains Mono", monospace;
+    letter-spacing: .06em; }
+  .badge .in { color: var(--gold); }
+  .loading { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px; justify-content: center;
+    align-items: center; background: rgba(10,11,14,.85); color: var(--muted); font-size: 13px; }
+  .bar { width: 180px; height: 4px; background: var(--s2); border-radius: 4px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--gold); transition: width .15s; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+  .group { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  button { appearance: none; border: 1px solid var(--line); background: var(--s1); color: var(--text);
+    border-radius: 10px; min-height: 40px; min-width: 40px; padding: 0 12px; font: 600 13px/1 inherit;
+    cursor: pointer; touch-action: manipulation; }
+  button:hover { background: var(--s2); }
+  button:focus-visible, .handle:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  button.play { background: var(--text); color: var(--ink); border-color: var(--text); min-width: 52px; }
+  button.on { border-color: var(--gold); color: var(--gold); }
+  button.mark { flex: 1 1 160px; }
+  button.mark.start { border-color: rgba(232,193,112,.55); }
+  button.mark.end { border-color: rgba(255,59,48,.55); }
+  .time { font: 600 12px/1 ui-monospace, "JetBrains Mono", monospace; color: var(--muted); white-space: nowrap; }
+  .track { position: relative; height: 64px; margin: 0 11px; border-radius: 10px; background: var(--s1);
+    border: 1px solid var(--line); touch-action: none; user-select: none; cursor: pointer; }
+  canvas#strip { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 10px; opacity: .55; }
+  .dim { position: absolute; top: 0; bottom: 0; background: rgba(10,11,14,.62); pointer-events: none; }
+  .sel { position: absolute; top: 0; bottom: 0; border-top: 2px solid var(--gold); border-bottom: 2px solid var(--gold);
+    background: rgba(232,193,112,.10); pointer-events: none; }
+  .playhead { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text); pointer-events: none;
+    box-shadow: 0 0 6px rgba(244,239,230,.6); }
+  .handle { position: absolute; top: -6px; bottom: -6px; width: 22px; margin-left: -11px; border-radius: 7px;
+    display: flex; align-items: center; justify-content: center; cursor: ew-resize; touch-action: none;
+    font: 800 11px/1 ui-monospace, monospace; color: var(--ink); box-shadow: 0 2px 10px rgba(0,0,0,.5); }
+  .handle.start { background: var(--gold); }
+  .handle.end { background: var(--red); color: #fff; }
+  .hint { color: var(--muted); font-size: 12.5px; }
+  .ends { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .card { background: var(--s1); border: 1px solid var(--line); border-radius: 12px; padding: 8px; display: flex;
+    gap: 10px; align-items: center; min-width: 0; }
+  .card canvas { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; background: #000; flex: none; }
+  .card .k { font: 700 10.5px/1 ui-monospace, monospace; letter-spacing: .14em; text-transform: uppercase; }
+  .card.start .k { color: var(--gold); } .card.end .k { color: var(--red); }
+  .card .v { font-size: 15px; font-weight: 700; margin-top: 4px; }
+  .card .f { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .summary { color: var(--muted); font-size: 13px; }
+  .summary b { color: var(--text); }
+  @media (max-width: 520px) {
+    .ends { grid-template-columns: 1fr; }
+    .controls { justify-content: center; }
+    .time { width: 100%; text-align: center; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap" id="app" hidden>
+  <div class="stage" id="stage">
+    <canvas id="view" aria-label="Your uploaded swing video"></canvas>
+    <div class="badge" id="badge">FRAME –</div>
+    <div class="loading" id="loading"><div id="loadtxt">Loading your video…</div><div class="bar"><i id="loadbar"></i></div></div>
+  </div>
+
+  <div class="controls">
+    <div class="group" role="group" aria-label="Playback">
+      <button id="toStart" title="Jump to start marker" aria-label="Jump to start marker">⇤</button>
+      <button id="prev" title="Previous frame (←)" aria-label="Previous frame">‹</button>
+      <button id="play" class="play" title="Play / pause (space)" aria-label="Play">▶</button>
+      <button id="next" title="Next frame (→)" aria-label="Next frame">›</button>
+      <button id="toEnd" title="Jump to end marker" aria-label="Jump to end marker">⇥</button>
+    </div>
+    <div class="group" role="group" aria-label="Speed and looping">
+      <button id="speed" title="Playback speed" aria-label="Playback speed">1×</button>
+      <button id="loop" title="Loop only the selected part" aria-label="Loop selection">Loop selection</button>
+    </div>
+    <div class="time" id="time">0.00 / 0.00 s</div>
+  </div>
+
+  <div class="track" id="track" aria-label="Timeline: drag the S and E markers">
+    <canvas id="strip"></canvas>
+    <div class="dim" id="dimL"></div><div class="dim" id="dimR"></div>
+    <div class="sel" id="sel"></div>
+    <div class="playhead" id="playhead"></div>
+    <div class="handle start" id="hStart" role="slider" tabindex="0" aria-label="Swing start marker">S</div>
+    <div class="handle end" id="hEnd" role="slider" tabindex="0" aria-label="Swing end marker">E</div>
+  </div>
+  <div class="hint">Play or scrub to find your swing, then drag <b style="color:var(--gold)">S</b> to just before it starts and
+    <b style="color:var(--red)">E</b> to just after it ends — or use the buttons below at the current frame.</div>
+
+  <div class="controls">
+    <button class="mark start" id="setStart">Set START here</button>
+    <button class="mark end" id="setEnd">Set END here</button>
+  </div>
+
+  <div class="ends">
+    <div class="card start"><canvas id="cStart" width="144" height="144"></canvas>
+      <div><div class="k">Start</div><div class="v" id="vStart">–</div><div class="f" id="fStart"></div></div></div>
+    <div class="card end"><canvas id="cEnd" width="144" height="144"></canvas>
+      <div><div class="k">End</div><div class="v" id="vEnd">–</div><div class="f" id="fEnd"></div></div></div>
+  </div>
+  <div class="summary" id="summary"></div>
+</div>
+
+<script>
+/* BL-008C.36 -- visual swing trimmer.
+ *
+ * Shows the frames the SERVER decoded (not the raw upload), so what the user
+ * sees is exactly what gets analyzed: frame k on screen is frame k in the
+ * analysis, and every time shown is that frame's real presentation timestamp
+ * (no assumed fps). Works for any clip OpenCV can decode, including iPhone
+ * HEVC that many browsers can't play in a <video> tag.
+ *
+ * Talks only to its same-origin Streamlit parent (raw component protocol, no
+ * dependencies). Reports {clip_id, start, end, seq} only when the user commits
+ * a marker -- never while playing, scrubbing or dragging -- so the app never
+ * reruns (let alone charges) from playback.
+ */
+(function () {
+  "use strict";
+  var ORIGIN = window.location.origin, parentOk = false;
+  try { parentOk = window.parent !== window && window.parent.location.origin === ORIGIN; } catch (e) {}
+  if (!parentOk) return;
+  function send(type, extra) {
+    var m = { isStreamlitMessage: true, type: type };
+    for (var k in extra) m[k] = extra[k];
+    window.parent.postMessage(m, ORIGIN);
+  }
+  var qs = new URLSearchParams(location.search), base = qs.get("streamlitUrl") || (ORIGIN + "/");
+  if (!/\/$/.test(base)) base += "/";
+  function mediaUrl(u) { return /^https?:/.test(u) ? u : new URL(u.replace(/^\//, ""), base).toString(); }
+
+  var $ = function (id) { return document.getElementById(id); };
+  var view = $("view"), vctx = view.getContext("2d"), strip = $("strip"), sctx = strip.getContext("2d");
+  var S = { clip: null, frames: [], imgs: [], loaded: 0, cur: 0, start: 0, end: 0, playing: false,
+            speed: 1, loop: false, t: 0, last: 0, seq: 0, argStart: null, argEnd: null, minGap: 3 };
+  // Commit numbers continue from the server's acknowledged count after a
+  // reload (set in load()), so a fresh iframe's first commit is never
+  // mistaken for one the server already applied.
+  var SPEEDS = [1, 0.5, 0.25];
+
+  function fmt(t) { return (Math.round(t * 100) / 100).toFixed(2) + " s"; }
+  // Positions on the timeline use real timestamps, so a variable-frame-rate
+  // clip is laid out honestly (frames are not assumed evenly spaced).
+  function dur() { var f = S.frames; return f.length ? Math.max(f[f.length - 1].t, 1e-6) : 1e-6; }
+  function xOf(k) { return S.frames[k].t / dur(); }
+  function nearestK(frac) {
+    var tt = frac * dur(), f = S.frames, lo = 0, hi = f.length - 1;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (f[mid].t < tt) lo = mid + 1; else hi = mid; }
+    if (lo > 0 && Math.abs(f[lo - 1].t - tt) <= Math.abs(f[lo].t - tt)) lo--;
+    return lo;
+  }
+  function kOfIndex(idx) { // preview position for a decoded frame index (nearest preview at or before)
+    var f = S.frames, best = 0;
+    for (var k = 0; k < f.length; k++) { if (f[k].i <= idx) best = k; else break; }
+    return best;
+  }
+
+  function draw(canvas, ctx, k, cover) {
+    var img = S.imgs[k];
+    if (!img || !img.complete || !img.naturalWidth) {
+      // nearest loaded frame so scrubbing never shows black
+      for (var d = 1; d < S.imgs.length; d++) {
+        var a = S.imgs[k - d], b = S.imgs[k + d];
+        if (a && a.complete && a.naturalWidth) { img = a; break; }
+        if (b && b.complete && b.naturalWidth) { img = b; break; }
+      }
+      if (!img || !img.naturalWidth) return;
+    }
+    if (!cover) { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); return; }
+    var s = Math.max(canvas.width / img.naturalWidth, canvas.height / img.naturalHeight);
+    var w = img.naturalWidth * s, h = img.naturalHeight * s;
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+  }
+
+  function drawStrip() {
+    var r = strip.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    strip.width = Math.max(1, Math.round(r.width * dpr)); strip.height = Math.max(1, Math.round(r.height * dpr));
+    if (!S.frames.length) return;
+    var aspect = (S.w || 16) / (S.h || 9), th = strip.height, tw = Math.max(8, th * aspect);
+    var n = Math.max(1, Math.ceil(strip.width / tw));
+    for (var j = 0; j < n; j++) {
+      var k = nearestK(Math.min(1, (j + 0.5) * tw / strip.width)), img = S.imgs[k];
+      if (img && img.complete && img.naturalWidth) sctx.drawImage(img, j * tw, 0, tw, th);
+    }
+  }
+
+  function render() {
+    if (!S.frames.length) return;
+    var f = S.frames[S.cur];
+    draw(view, vctx, S.cur, false);
+    var inSel = S.cur >= S.start && S.cur <= S.end;
+    $("badge").innerHTML = "FRAME " + f.i + " / " + (S.total - 1) + " · " + fmt(f.t) +
+      (inSel ? ' · <span class="in">IN SELECTION</span>' : "");
+    $("time").textContent = fmt(f.t).replace(" s", "") + " / " + fmt(dur());
+    var W = $("track").clientWidth, xs = xOf(S.start) * W, xe = xOf(S.end) * W, xp = xOf(S.cur) * W;
+    $("hStart").style.left = xs + "px"; $("hEnd").style.left = xe + "px"; $("playhead").style.left = xp + "px";
+    $("sel").style.left = xs + "px"; $("sel").style.width = Math.max(0, xe - xs) + "px";
+    $("dimL").style.left = "0px"; $("dimL").style.width = xs + "px";
+    $("dimR").style.left = xe + "px"; $("dimR").style.width = Math.max(0, W - xe) + "px";
+    var fs = S.frames[S.start], fe = S.frames[S.end];
+    $("hStart").setAttribute("aria-valuenow", fs.i); $("hEnd").setAttribute("aria-valuenow", fe.i);
+    $("hStart").setAttribute("aria-valuetext", fmt(fs.t)); $("hEnd").setAttribute("aria-valuetext", fmt(fe.t));
+    $("vStart").textContent = "≈ " + fmt(fs.t); $("fStart").textContent = "frame " + fs.i;
+    $("vEnd").textContent = "≈ " + fmt(fe.t); $("fEnd").textContent = "frame " + fe.i;
+    draw($("cStart"), $("cStart").getContext("2d"), S.start, true);
+    draw($("cEnd"), $("cEnd").getContext("2d"), S.end, true);
+    $("summary").innerHTML = "Selected <b>" + fmt(fe.t - fs.t) + "</b> · frames <b>" + fs.i + "–" + fe.i +
+      "</b> of " + S.total + (S.fpsLabel ? " · clip measured at ≈ " + S.fpsLabel + " fps" : "") +
+      ". Times are each frame's real timestamp; frame numbers are exact.";
+    $("play").textContent = S.playing ? "❚❚" : "▶";
+    $("play").setAttribute("aria-label", S.playing ? "Pause" : "Play");
+    $("loop").classList.toggle("on", S.loop);
+    $("speed").textContent = (S.speed === 1 ? "1" : S.speed === 0.5 ? "½" : "¼") + "×";
+  }
+
+  function commit() {
+    S.seq += 1;
+    send("streamlit:setComponentValue", { dataType: "json", value: {
+      clip_id: S.clip, start: S.frames[S.start].i, end: S.frames[S.end].i, seq: S.seq } });
+  }
+  var commitTimer = null;
+  function commitSoon() { clearTimeout(commitTimer); commitTimer = setTimeout(commit, 450); }
+
+  function setStart(k, doCommit) {
+    k = Math.max(0, Math.min(k, S.frames.length - 1));
+    while (k > 0 && S.frames[S.end].i - S.frames[k].i < S.minGap) k--;
+    if (S.frames[S.end].i - S.frames[k].i < S.minGap) return;
+    S.start = k; render(); if (doCommit) commit();
+  }
+  function setEnd(k, doCommit) {
+    k = Math.max(0, Math.min(k, S.frames.length - 1));
+    while (k < S.frames.length - 1 && S.frames[k].i - S.frames[S.start].i < S.minGap) k++;
+    if (S.frames[k].i - S.frames[S.start].i < S.minGap) return;
+    S.end = k; render(); if (doCommit) commit();
+  }
+  function seek(k) { S.cur = Math.max(0, Math.min(k, S.frames.length - 1)); S.t = S.frames[S.cur].t; render(); }
+
+  // ---- playback (real-time from timestamps, so 60 fps footage plays at true speed)
+  function tick(now) {
+    if (!S.playing) return;
+    var dt = (now - S.last) / 1000; S.last = now;
+    S.t += dt * S.speed;
+    var lo = S.loop ? S.start : 0, hi = S.loop ? S.end : S.frames.length - 1;
+    if (S.t > S.frames[hi].t) {
+      if (S.loop) S.t = S.frames[lo].t; else { S.t = S.frames[hi].t; S.playing = false; }
+    }
+    var k = S.cur;
+    while (k < hi && S.frames[k + 1].t <= S.t) k++;
+    if (S.frames[k].t > S.t) { k = lo; while (k < hi && S.frames[k + 1].t <= S.t) k++; }
+    S.cur = k; render();
+    if (S.playing) requestAnimationFrame(tick);
+  }
+  function play() {
+    if (S.playing) { S.playing = false; render(); return; }
+    var lo = S.loop ? S.start : 0, hi = S.loop ? S.end : S.frames.length - 1;
+    if (S.cur >= hi || (S.loop && (S.cur < lo || S.cur > hi))) seek(lo);
+    S.playing = true; S.t = S.frames[S.cur].t; S.last = performance.now(); render(); requestAnimationFrame(tick);
+  }
+  function pause() { if (S.playing) { S.playing = false; render(); } }
+
+  // ---- pointer interaction on the timeline
+  function fracAt(ev) { var r = $("track").getBoundingClientRect(); return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)); }
+  // Drags listen on the whole window (works even if pointer capture is
+  // unavailable) and commit exactly once, on release.
+  function capture(el, id) { try { el.setPointerCapture(id); } catch (e) {} }
+  function onDrag(move, done) {
+    var up = function (e) {
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up); if (done) done(e);
+    };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+  function dragHandle(el, which) {
+    el.addEventListener("pointerdown", function (ev) {
+      ev.preventDefault(); ev.stopPropagation(); pause(); capture(el, ev.pointerId);
+      onDrag(function (e) {
+        var k = nearestK(fracAt(e)); if (which === "s") setStart(k); else setEnd(k);
+        seek(which === "s" ? S.start : S.end);
+      }, function () { commit(); });
+    });
+    el.addEventListener("keydown", function (e) {
+      var step = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+      if (!step) return;
+      e.preventDefault(); pause();
+      if (which === "s") { setStart(S.start + step); seek(S.start); } else { setEnd(S.end + step); seek(S.end); }
+      commitSoon();
+    });
+  }
+  dragHandle($("hStart"), "s"); dragHandle($("hEnd"), "e");
+  $("track").addEventListener("pointerdown", function (ev) {
+    if (ev.target.classList.contains("handle")) return;
+    pause(); seek(nearestK(fracAt(ev)));
+    capture($("track"), ev.pointerId);
+    onDrag(function (e) { seek(nearestK(fracAt(e))); }, null);   // scrubbing never commits
+  });
+
+  $("play").onclick = play;
+  $("prev").onclick = function () { pause(); seek(S.cur - 1); };
+  $("next").onclick = function () { pause(); seek(S.cur + 1); };
+  $("toStart").onclick = function () { pause(); seek(S.start); };
+  $("toEnd").onclick = function () { pause(); seek(S.end); };
+  $("speed").onclick = function () { S.speed = SPEEDS[(SPEEDS.indexOf(S.speed) + 1) % SPEEDS.length]; render(); };
+  $("loop").onclick = function () { S.loop = !S.loop; render(); };
+  $("setStart").onclick = function () { pause(); setStart(S.cur, true); };
+  $("setEnd").onclick = function () { pause(); setEnd(S.cur, true); };
+  $("stage").tabIndex = 0;
+  $("stage").addEventListener("keydown", function (e) {
+    if (e.key === " ") { e.preventDefault(); play(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); pause(); seek(S.cur - 1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); pause(); seek(S.cur + 1); }
+  });
+  $("stage").addEventListener("click", function () { $("stage").focus(); });
+
+  function load(a) {
+    S.clip = a.clip_id; S.frames = a.frames || []; S.total = a.total_frames || S.frames.length;
+    S.w = a.width; S.h = a.height; S.fpsLabel = a.fps_label || null; S.loaded = 0; S.playing = false;
+    view.width = a.width || 480; view.height = a.height || 270;
+    S.imgs = S.frames.map(function (f) {
+      var img = new Image(); img.decoding = "async";
+      img.onload = img.onerror = function () {
+        S.loaded++; var pct = Math.round(100 * S.loaded / S.frames.length);
+        $("loadbar").style.width = pct + "%"; $("loadtxt").textContent = "Loading your video… " + pct + "%";
+        if (S.loaded === 1 || S.loaded === S.frames.length || S.loaded % 12 === 0) { drawStrip(); render(); }
+        if (S.loaded === S.frames.length) $("loading").hidden = true;
+      };
+      img.src = mediaUrl(f.u);
+      return img;
+    });
+    S.start = kOfIndex(a.start); S.end = kOfIndex(a.end); S.cur = S.start;
+    S.seq = typeof a.ack_seq === "number" ? a.ack_seq : 0;
+    S.argStart = a.start; S.argEnd = a.end;
+    $("loading").hidden = false;
+    $("app").hidden = false;
+    fitView();
+    render();
+  }
+
+  // Size the player from the PARENT page's viewport (vh inside this iframe
+  // would be circular: the iframe's height comes from this content).
+  function fitView() {
+    var maxW = $("stage").clientWidth || 640, ph = 800;
+    try { ph = window.parent.innerHeight || ph; } catch (e) {}
+    var maxH = Math.max(220, Math.min(620, ph * 0.58));
+    var s = Math.min(maxW / view.width, maxH / view.height);
+    view.style.width = Math.floor(view.width * s) + "px";
+    view.style.height = Math.floor(view.height * s) + "px";
+  }
+
+  window.addEventListener("message", function (ev) {
+    if (ev.origin !== ORIGIN || ev.source !== window.parent) return;
+    var d = ev.data || {}; if (d.type !== "streamlit:render") return;
+    var a = d.args || {};
+    if (a.clip_id !== S.clip) { load(a); return; }
+    // The server changed the selection (e.g. the simple-controls fallback):
+    // follow it -- but only once the server has applied our latest commit
+    // (ack_seq), so an older render still in flight can't undo a newer edit.
+    var caughtUp = typeof a.ack_seq === "number" ? a.ack_seq >= S.seq : S.seq === 0;
+    if (caughtUp && (a.start !== S.argStart || a.end !== S.argEnd)) {
+      S.argStart = a.start; S.argEnd = a.end;
+      S.start = kOfIndex(a.start); S.end = kOfIndex(a.end); render();
+    }
+  });
+  window.addEventListener("resize", function () { fitView(); drawStrip(); render(); });
+  try { window.parent.addEventListener("resize", function () { fitView(); drawStrip(); render(); }); } catch (e) {}
+  new ResizeObserver(function () {
+    send("streamlit:setFrameHeight", { height: Math.ceil(document.documentElement.scrollHeight) + 4 });
+  }).observe(document.body);
+  send("streamlit:componentReady", { apiVersion: 1 });
+})();
+</script>
+</body>
+</html>
