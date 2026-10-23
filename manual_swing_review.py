@@ -64,19 +64,30 @@ from subscription_storage import (
     load_my_plan, record_successful_swing_analysis, charge_nonce_for, clear_charge_nonce,
 )
 
+# BL-008C.37: check results say plainly whether the selection was
+# accepted, is uncertain (you may still continue), or can't be used, and
+# why -- the "why" is the movement check's own one-line summary.
 EVIDENCE_MESSAGES = {
-    "SINGLE_MOVEMENT_DETECTED": ("info", "We found one clear, well-bounded movement in this selection."),
-    "AMBIGUOUS_MOVEMENT": ("warning", "We're not confident there's a single clear movement in this exact "
-                                       "selection -- it may include extra footage before or after the real "
-                                       "movement. Double-check your selection before confirming."),
-    "INSUFFICIENT_EVIDENCE": ("warning", "We didn't detect any clear movement in this selection. Make sure "
-                                          "your swing is inside the selected range before confirming."),
+    "SINGLE_MOVEMENT_DETECTED": ("success", "Looks good: one continuous movement."),
+    "AMBIGUOUS_MOVEMENT": ("warning", "Not sure about this selection -- you can still continue."),
+    "INSUFFICIENT_EVIDENCE": ("warning", "Not sure about this selection -- you can still continue."),
 }
 BLOCKED_STATUS_MESSAGES = {
-    "multiple_movements": "This selection appears to contain more than one distinct movement. Please narrow "
-                           "it down to just your swing.",
+    "multiple_movements": "Can't use this selection yet: it has more than one separate fast movement.",
+    "poor_quality": "Can't use this selection: you weren't tracked clearly enough to measure it.",
     "rejected_input": "That selection isn't usable: {reason}",
 }
+BLOCKED_RECOVERY = {
+    "multiple_movements": "Pick one of them below, or move the S and E markers around just your swing, "
+                          "then check again. Nothing was charged.",
+    "poor_quality": "Try a selection where your whole body is in frame, or upload a clearer clip "
+                     "(side view, good light, full body visible). Nothing was charged.",
+    "rejected_input": "Move the S and E markers, then check again. Nothing was charged.",
+}
+# Extra time kept around a detected movement when the user picks it, so
+# the load before it and the follow-through after it stay in the selection.
+_PICK_PAD_BEFORE_S = 0.5
+_PICK_PAD_AFTER_S = 0.4
 PLAIN_LANGUAGE_METRIC_INFO = {
     "hand_to_torso_distance_range_normalized_window": {
         "label": "Hand-to-body distance (bat hand)",
@@ -234,7 +245,7 @@ def _prepare_clip() -> bool:
         "id": uuid.uuid4().hex, "preview_size": prep.preview_size, "n": n,
         "duration": prep.duration_s,
     }
-    st.session_state["manual_review_selection"] = (0, max(n - 1, 1))
+    st.session_state["manual_review_selection"] = _snap_to_previews(0, max(n - 1, 1))
     # BL-008C.23: a stable per-decoded-video id for the usage-charge
     # idempotency key below -- generated once here (not per click), so
     # re-clicking "Analyze this selection" for the SAME selection after a
@@ -245,10 +256,64 @@ def _prepare_clip() -> bool:
     return True
 
 
+def _check_summary(result) -> str:
+    ev = getattr(result, "validation_evidence", None) or {}
+    return ev.get("summary") or ""
+
+
+def _major_phase_picks(result, pts: list[float], n: int) -> list[tuple[str, int, int]]:
+    """For a 'two separate movements' result: one (label, start, end) per
+    detected fast movement, padded so the load and follow-through stay in,
+    and never reaching into the neighbouring movement."""
+    phases = [p for p in ((getattr(result, "validation_evidence", None) or {}).get("phases") or [])
+              if p.get("major")]
+    if len(phases) < 2 or len(pts) != n:
+        return []
+    picks = []
+    for k, p in enumerate(phases):
+        lo_t = pts[p["start_frame"]] - _PICK_PAD_BEFORE_S
+        hi_t = pts[p["end_frame"]] + _PICK_PAD_AFTER_S
+        if k > 0:
+            lo_t = max(lo_t, (pts[phases[k - 1]["end_frame"]] + pts[p["start_frame"]]) / 2)
+        if k + 1 < len(phases):
+            hi_t = min(hi_t, (pts[p["end_frame"]] + pts[phases[k + 1]["start_frame"]]) / 2)
+        s = next((i for i in range(n) if pts[i] >= lo_t), 0)
+        e = max((i for i in range(n) if pts[i] <= hi_t), default=n - 1)
+        if s < e:
+            s, e = _snap_to_previews(s, e)
+            picks.append((f"Use movement {k + 1} ({pts[s]:.2f}s to {pts[e]:.2f}s)", s, e))
+    return picks
+
+
+def _snap_to_previews(s: int, e: int) -> tuple[int, int]:
+    """Long clips only have a preview image for every k-th frame, and the
+    player shows the nearest preview AT OR BEFORE a marker. A marker the
+    server sets on a frame without a preview would therefore show a
+    different frame number than the one checked and analyzed. Snap START
+    down and END up to preview frames so the player and the server always
+    agree (BL-008C.37, found in the browser on a 453-frame clip)."""
+    idx = [i for i, _ in (st.session_state.get("manual_review_previews") or [])]
+    if not idx:
+        return s, e
+    s2 = max((i for i in idx if i <= s), default=idx[0])
+    e2 = min((i for i in idx if i >= e), default=idx[-1])
+    if s2 >= e2:
+        return s, e
+    return s2, e2
+
+
+def _set_selection(s: int, e: int) -> None:
+    s, e = _snap_to_previews(s, e)
+    st.session_state["manual_review_selection"] = (s, e)
+    for k in ("manual_review_check_result", "manual_review_checked_selection",
+              "manual_review_final_result", "manual_review_paywall_reason"):
+        st.session_state.pop(k, None)
+
+
 def _on_slider_change() -> None:
     v = st.session_state.get("manual_review_slider")
-    if isinstance(v, (tuple, list)) and len(v) == 2:
-        st.session_state["manual_review_selection"] = (int(v[0]), int(v[1]))
+    if isinstance(v, (tuple, list)) and len(v) == 2 and int(v[0]) < int(v[1]):
+        st.session_state["manual_review_selection"] = _snap_to_previews(int(v[0]), int(v[1]))
 
 
 def _render_body(user: dict | None) -> None:
@@ -289,6 +354,12 @@ def _render_body(user: dict | None) -> None:
         if isinstance(s_, int) and isinstance(e_, int) and 0 <= s_ < e_ < n:
             st.session_state["manual_review_selection"] = (s_, e_)
     start_frame, end_frame = st.session_state.get("manual_review_selection", (0, max(n - 1, 1)))
+    # Every marker the page shows must be a frame the player can display
+    # (see _snap_to_previews); a selection stored before that rule (or any
+    # off-preview value) is aligned here once.
+    if (start_frame, end_frame) != _snap_to_previews(start_frame, end_frame):
+        start_frame, end_frame = _snap_to_previews(start_frame, end_frame)
+        st.session_state["manual_review_selection"] = (start_frame, end_frame)
 
     # ---- 1. watch + mark --------------------------------------------------
     st.markdown('<div class="blx-sec">Watch your clip and mark the swing</div>', unsafe_allow_html=True)
@@ -303,9 +374,16 @@ def _render_body(user: dict | None) -> None:
         )
 
     with st.expander("Trouble with the player? Use simple controls", expanded=not (previews and pts)):
+        # Long clips have a preview for every k-th frame only; the slider
+        # steps the same way, so it can only pick frames the player can show.
+        _pidx = [i for i, _ in previews]
+        _stride = _pidx[1] - _pidx[0] if len(_pidx) > 1 and _pidx[0] == 0 else 1
+        if _stride > 1 and any(b - a != _stride for a, b in zip(_pidx, _pidx[1:])):
+            _stride = 1
         if st.session_state.get("manual_review_slider") != (start_frame, end_frame):
             st.session_state["manual_review_slider"] = (start_frame, end_frame)
-        st.slider("Swing start and end (frame numbers)", min_value=0, max_value=max(n - 1, 1),
+        st.slider("Swing start and end (frame numbers)", min_value=0,
+                  max_value=_pidx[-1] if _stride > 1 else max(n - 1, 1), step=_stride,
                   key="manual_review_slider", on_change=_on_slider_change)
         if previews:
             def _nearest(idx: int) -> bytes:
@@ -334,29 +412,52 @@ def _render_body(user: dict | None) -> None:
         st.session_state.pop("manual_review_paywall_reason", None)
 
     # ---- 2. check ----------------------------------------------------------
+    # Source width/height, so the movement check compares sideways and
+    # up-down motion in the same units (previews keep the source aspect).
+    _pw, _ph = tuple(clip.get("preview_size") or (0, 0)) or (0, 0)
+    frame_aspect = (_pw / _ph) if _pw and _ph else None
     if st.button("Check this selection", type="primary"):
         with st.spinner("Checking your selection…"):
             st.session_state["manual_review_check_result"] = analyze_user_selection(
                 frames, source_file="manual_review_upload", approx_start=start_frame, approx_end=end_frame,
                 selected_by=f"human_reviewer:{(user or {}).get('slug', 'unknown')}", user_confirmed_swing=False,
+                frame_aspect=frame_aspect,
             )
         st.session_state["manual_review_checked_selection"] = current_selection
         st.session_state.pop("manual_review_final_result", None)
 
     check_result = st.session_state.get("manual_review_check_result")
     if check_result is not None and st.session_state.get("manual_review_checked_selection") == current_selection:
+        summary = _check_summary(check_result)
         if check_result.status in BLOCKED_STATUS_MESSAGES:
             st.markdown('<div class="blx-sec">Check result</div>', unsafe_allow_html=True)
-            st.error(BLOCKED_STATUS_MESSAGES[check_result.status].format(reason=check_result.reason))
-            st.caption("Move the S and E markers above to bracket just your swing, then check again. "
-                       "Nothing was charged.")
+            headline = BLOCKED_STATUS_MESSAGES[check_result.status].format(reason=check_result.reason)
+            st.error(headline + (f"\n\n{summary}" if summary else ""))
+            st.caption(BLOCKED_RECOVERY.get(check_result.status, "Nothing was charged."))
+            picks = _major_phase_picks(check_result, pts, n) if check_result.status == "multiple_movements" else []
+            if picks:
+                cols = st.columns(len(picks))
+                for col, (label, ps, pe) in zip(cols, picks):
+                    if col.button(label, key=f"manual_review_pick_{ps}_{pe}", width="stretch"):
+                        _set_selection(ps, pe)
+                        st.rerun()
         else:
-            st.markdown('<div class="blx-sec">Confirm</div>', unsafe_allow_html=True)
+            st.markdown('<div class="blx-sec">Check result</div>', unsafe_allow_html=True)
             kind, msg = EVIDENCE_MESSAGES.get(check_result.validation_state, ("info", ""))
-            getattr(st, kind)(msg)
+            getattr(st, kind)(msg + (f"\n\n{summary}" if summary else ""))
+            uncertain = check_result.validation_state != "SINGLE_MOVEMENT_DETECTED"
+            if uncertain:
+                st.caption("If you've watched the clip and your swing is between the markers, you can "
+                           "still analyze it. The result will be marked as coming from an uncertain check. "
+                           "Or move the markers and check again; checking is free.")
+            st.markdown('<div class="blx-sec">Confirm</div>', unsafe_allow_html=True)
+            # Keyed to THIS selection: a tick given for one selection never
+            # carries over to a different one.
             confirmed = st.checkbox(
-                "I've reviewed the clip above and confirm this selection contains my intended swing.",
-                value=False, key="manual_review_confirm_checkbox",
+                ("I've watched it and this selection contains my one intended swing, even though the check "
+                 "wasn't sure." if uncertain else
+                 "I've reviewed the clip above and confirm this selection contains my intended swing."),
+                value=False, key=f"manual_review_confirm_{clip_id}_{start_frame}_{end_frame}",
             )
             st.caption("This is your own statement, not something BarrelLabs verifies automatically. "
                        "Analyzing uses one swing analysis from your plan.")
@@ -382,7 +483,7 @@ def _render_body(user: dict | None) -> None:
                         _result = analyze_user_selection(
                             frames, source_file="manual_review_upload", approx_start=start_frame, approx_end=end_frame,
                             selected_by=f"human_reviewer:{(user or {}).get('slug', 'unknown')}",
-                            user_confirmed_swing=True,
+                            user_confirmed_swing=True, frame_aspect=frame_aspect,
                         )
                     # Usage is recorded only for an actual successful
                     # measurement -- "poor_quality" and any other
@@ -443,12 +544,18 @@ def _render_body(user: dict | None) -> None:
         st.markdown('<div class="blx-sec">Results</div>', unsafe_allow_html=True)
         if final_result.status == "poor_quality":
             st.warning("The player wasn't tracked clearly enough in that exact selection to measure "
-                       "anything reliably, even though you confirmed it.")
+                       "anything reliably, even though you confirmed it. Nothing was charged.")
+        elif final_result.status in BLOCKED_STATUS_MESSAGES:
+            st.warning(BLOCKED_STATUS_MESSAGES[final_result.status].format(reason=final_result.reason)
+                       + " Nothing was charged.")
         elif final_result.status == "experimental_result":
             s, e = final_result.resolved_interval
             st.error(f"EXPERIMENTAL, user-confirmed -- not automatically verified: "
                      f"{final_result.experimental_disclaimer}")
             st.success(f"Analyzed exactly what you selected: frames {s}-{e}{_secs(s, e)}.")
+            if final_result.validation_state != "SINGLE_MOVEMENT_DETECTED":
+                st.warning("Lower confidence: the automatic check wasn't sure about this selection "
+                           f"({_check_summary(final_result)}). You confirmed it contains your swing.")
 
             displayable, internal = [], []
             for m in final_result.result.measurements:

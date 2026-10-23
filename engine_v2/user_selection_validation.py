@@ -1,5 +1,12 @@
 """BL-008C.16 Deliverables 1-4 -- user-selection MOVEMENT validation.
 
+RETIRED FROM THE PRODUCT FLOW IN BL-008C.37: engine_v2.user_guided_flow
+now uses engine_v2.selection_structure. This module grouped WHOLE-CLIP
+motion candidates and hard-blocked real single swings (the owner's
+production clip and 5 of 6 padded phone selections in the BL-008C.16
+matrix). Kept, unchanged, for its STATE_* names and as the reference for
+tests that document the old behaviour.
+
 BL-008C.17 Deliverable 1 update: this module's states were renamed
 (STATE_SUPPORTED_SINGLE_SWING -> STATE_SINGLE_MOVEMENT_DETECTED,
 STATE_MULTIPLE_SWINGS -> STATE_MULTIPLE_MOVEMENTS, old names kept as

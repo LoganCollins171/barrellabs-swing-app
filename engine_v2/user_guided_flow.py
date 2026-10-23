@@ -9,9 +9,11 @@ answers four SEPARATE questions, in order, never conflating them
      minimum length)? -- checked first, below, independent of any
      motion evidence.
   B. Is there observable evidence of a single, clearly-bounded MOVEMENT
-     in the selection? -- engine_v2.user_selection_validation. This is
-     NOT "is it a swing": BL-008C.16 confirmed on real footage that this
-     evidence is equally satisfied by running or a body turn.
+     in the selection? -- engine_v2.selection_structure since BL-008C.37
+     (was engine_v2.user_selection_validation, which falsely blocked real
+     single swings). This is NOT "is it a swing": BL-008C.16 confirmed on
+     real footage that this evidence is equally satisfied by running or a
+     body turn.
   C. Did the user explicitly confirm the selected movement is their
      intended swing? -- a statement by the user, never inferred, never
      treated as scientific proof (Deliverable 2). Nothing is measured
@@ -68,9 +70,12 @@ from engine_v2.event_candidates import EventCandidate, SCHEMA_VERSION as _EC_SCH
 from engine_v2.target_track import _body_centroid_and_scale
 from engine_v2.event_candidates import extract_event_candidates
 from engine_v2.user_selection_validation import (
-    validate_user_selection,
     STATE_SINGLE_MOVEMENT_DETECTED, STATE_AMBIGUOUS_MOVEMENT, STATE_MULTIPLE_MOVEMENTS,
     STATE_INSUFFICIENT_EVIDENCE, STATE_INVALID_SELECTION,
+)
+from engine_v2.selection_structure import (
+    analyze_selection_structure,
+    DECISION_ACCEPTED, DECISION_UNCERTAIN, DECISION_MULTIPLE, DECISION_UNUSABLE,
 )
 from engine_v2.boundary_refinement import refine_candidate_boundaries
 from engine_v2.selected_candidate_measurement import (
@@ -93,14 +98,37 @@ EXPERIMENTAL_DISCLAIMER = (
     "exploratory estimates, not proof of anything about your mechanics."
 )
 
+# BL-008C.37: question B is now answered by
+# engine_v2.selection_structure (movement structure INSIDE the selection),
+# replacing engine_v2.user_selection_validation's whole-clip candidate
+# grouping, which falsely hard-blocked real single swings (owner's
+# production clip; see that module's docstring). Its decisions map onto the
+# existing states so callers and the UI keep working:
+STATE_UNUSABLE_TRACKING = "UNUSABLE_TRACKING"
+
+
+def _state_for(structure) -> str:
+    if structure.decision == DECISION_ACCEPTED:
+        return STATE_SINGLE_MOVEMENT_DETECTED
+    if structure.decision == DECISION_MULTIPLE:
+        return STATE_MULTIPLE_MOVEMENTS
+    if structure.decision == DECISION_UNUSABLE:
+        return STATE_UNUSABLE_TRACKING
+    if "no_clear_movement" in structure.reasons:
+        return STATE_INSUFFICIENT_EVIDENCE
+    return STATE_AMBIGUOUS_MOVEMENT
+
+
 # Question B's result never, by itself, unlocks measurement -- it only
-# determines whether confirmation is even offered (MULTIPLE_MOVEMENTS is
-# a hard block, since the selection structurally cannot be a single
-# measurable event regardless of what the user confirms) or must be
-# requested first (every other state).
-_HARD_BLOCK_STATES = {STATE_MULTIPLE_MOVEMENTS}
+# determines whether confirmation is offered. Only two outcomes block, and
+# both for a concrete technical reason: HIGH-confidence evidence of two
+# separate fast movements (measurements would blend them), and a body that
+# isn't tracked well enough to measure at all. Uncertain evidence never
+# blocks: the user may confirm and continue, with a warning.
+_HARD_BLOCK_STATES = {STATE_MULTIPLE_MOVEMENTS, STATE_UNUSABLE_TRACKING}
 _HARD_BLOCK_STATUS = {
     STATE_MULTIPLE_MOVEMENTS: "multiple_movements",
+    STATE_UNUSABLE_TRACKING: "poor_quality",   # same meaning as question D's gate: too poorly tracked to measure
 }
 
 
@@ -110,10 +138,12 @@ class UserGuidedAnalysisResult:
     status: str
     # "rejected_input" | "multiple_movements" | "needs_confirmation" |
     # "poor_quality" | "experimental_result"
+    # (BL-008C.37: "poor_quality" is now also returned at the CHECK step when
+    # the selection is too poorly tracked to measure)
     reason: str                       # human-readable explanation, always set when status != "experimental_result"
     requested_interval: tuple | None  # exactly what the reviewer selected
     resolved_interval: tuple | None   # the interval actually measured -- ALWAYS == requested_interval when measured at all
-    validation_state: str | None      # raw state from engine_v2.user_selection_validation (question B), for programmatic callers
+    validation_state: str | None      # question B's state (engine_v2.selection_structure, mapped by _state_for), for programmatic callers
     validation_evidence: dict | None
     user_confirmed_swing: bool        # echoes what the caller passed for question C -- always present, never inferred
     candidate_suggestion: dict | None   # informational only -- a nearby discovered candidate's own interval, if any; never applied
@@ -164,17 +194,26 @@ def _build_interval_descriptor(frames: list[LandmarkFrame], source_file: str, s:
     )
 
 
-def _nearest_candidate(candidates: list[EventCandidate], validation_evidence: dict | None) -> EventCandidate | None:
-    """Extracts whichever candidate the validation evidence pointed to
-    (if any) purely for the informational candidate_suggestion/
-    refinement_suggestion fields -- never used as a measurement source."""
-    if not validation_evidence:
-        return None
-    detail = validation_evidence.get("supporting_candidate") or validation_evidence.get("best_candidate")
-    if not detail:
-        return None
-    cid = detail.get("candidate_id")
-    return next((c for c in candidates if c.candidate_id == cid), None)
+@dataclasses.dataclass
+class _Validation:
+    state: str
+    reason: str
+    evidence: dict
+
+
+def _nearest_candidate(candidates: list[EventCandidate], s: int, e: int) -> EventCandidate | None:
+    """The live discovered candidate overlapping the selection most, purely
+    for the informational candidate_suggestion/refinement_suggestion fields
+    and the target-track id -- never used as a measurement source and
+    never part of the accept/reject decision (BL-008C.37)."""
+    best, best_ov = None, 0
+    for c in candidates:
+        if c.rejection_reason is not None:
+            continue
+        ov = max(0, min(e, c.end_frame) - max(s, c.start_frame) + 1)
+        if ov > best_ov:
+            best, best_ov = c, ov
+    return best
 
 
 def analyze_user_selection(
@@ -185,8 +224,12 @@ def analyze_user_selection(
     selected_by: str = "human_reviewer:dev_ui",
     user_confirmed_swing: bool = False,
     reviewer_confirmed_experimental: bool = False,  # deprecated alias for user_confirmed_swing -- see module docstring
+    frame_aspect: float | None = None,
 ) -> UserGuidedAnalysisResult:
-    """`frames` must already be decoded+pose-extracted by the caller (this
+    """`frame_aspect` (source width / height) lets the movement check
+    compare horizontal and vertical motion in the same units; optional.
+
+    `frames` must already be decoded+pose-extracted by the caller (this
     module does no I/O itself -- see analyze_uploaded_video below for the
     file-handling wrapper that does). `source_file` is a label only, for
     provenance -- never a path this module re-reads.
@@ -216,9 +259,11 @@ def analyze_user_selection(
                         requested, confirmed)
 
     candidates = extract_event_candidates(frames, source_file=source_file)
-    validation = validate_user_selection(frames, candidates, approx_start, approx_end)
+    structure = analyze_selection_structure(frames, approx_start, approx_end, frame_aspect=frame_aspect)
+    validation = _Validation(state=_state_for(structure), reason=structure.summary,
+                             evidence=structure.as_evidence())
 
-    nearest = _nearest_candidate(candidates, validation.evidence)
+    nearest = _nearest_candidate(candidates, approx_start, approx_end)
     candidate_suggestion = None
     if nearest is not None:
         candidate_suggestion = {
@@ -239,9 +284,11 @@ def analyze_user_selection(
                          "BL-008C.13 found this mechanism regresses some real events; shown for information only"),
             }
 
-    # Question B hard block: a selection with evidence of MORE THAN ONE
-    # distinct movement cannot be a single measurable event no matter
-    # what the user confirms -- ask for a corrected selection instead.
+    # Question B hard block (high-confidence separate movements, or a body
+    # too poorly tracked to measure) -- confirmation can't fix either; ask
+    # for a corrected selection or a clearer clip instead. This also runs on
+    # the confirmed Analyze call, so a blocked selection can never be
+    # measured or charged.
     if validation.state in _HARD_BLOCK_STATES:
         return UserGuidedAnalysisResult(
             schema_version=SCHEMA_VERSION, status=_HARD_BLOCK_STATUS[validation.state], reason=validation.reason,

@@ -114,7 +114,7 @@ def test_a_commit_for_a_different_clip_is_ignored(page):
     at, renders = page
     at.session_state["manual_review_trimmer"] = {"clip_id": "OLD-clip", "start": 3, "end": 9, "seq": 1}
     at.run()
-    assert _sel_text(at) == ("0", "39")
+    assert _sel_text(at) == ("0", "38")   # BL-008C.37: default end aligned to the last preview frame
 
 
 def test_invalid_committed_values_are_ignored(page):
@@ -125,15 +125,17 @@ def test_invalid_committed_values_are_ignored(page):
                 {"clip_id": "clipA", "start": "0", "end": 10, "seq": 5}):
         at.session_state["manual_review_trimmer"] = bad
         at.run()
-        assert _sel_text(at) == ("0", "39"), bad
+        assert _sel_text(at) == ("0", "38"), bad
 
 
 def test_simple_controls_change_the_selection_and_the_player_follows(page):
     at, renders = page
     at.run()
-    at.slider(key="manual_review_slider").set_value((5, 25)).run()
-    assert _sel_text(at) == ("5", "25")
-    assert (renders[-1]["start"], renders[-1]["end"]) == (5, 25)
+    # BL-008C.37: this fixture has a preview for every 2nd frame, so the
+    # slider steps by 2 (it can only pick frames the player can show)
+    at.slider(key="manual_review_slider").set_value((4, 26)).run()
+    assert _sel_text(at) == ("4", "26")
+    assert (renders[-1]["start"], renders[-1]["end"]) == (4, 26)
 
 
 def test_check_results_are_scoped_to_the_clip(page):

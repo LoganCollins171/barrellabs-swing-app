@@ -11,9 +11,15 @@ from engine_v2.types import LandmarkFrame
 from engine_v2.user_guided_flow import analyze_user_selection, analyze_uploaded_video
 
 
+# BL-008C.37: shoulders above hips (a real torso). The old fixture put every
+# body landmark at the same point -- a zero-length torso no real pose has,
+# which the movement check now (correctly) reports as unmeasurable.
+_Y = {"left_shoulder": 0.35, "right_shoulder": 0.35, "left_hip": 0.55, "right_hip": 0.55}
+
+
 def _lf(i, x, vis=0.9):
     return LandmarkFrame(frame_index=i, pts_s=None,
-                          landmarks={k: (x if "wrist" in k or "ankle" in k else 0.5, 0.5, vis) for k in
+                          landmarks={k: (x if "wrist" in k or "ankle" in k else 0.5, _Y.get(k, 0.5), vis) for k in
                                      ["left_wrist", "right_wrist", "left_ankle", "right_ankle",
                                       "left_shoulder", "right_shoulder", "left_hip", "right_hip",
                                       "left_knee", "right_knee", "left_ear", "right_ear"]},
@@ -121,9 +127,10 @@ def test_multiple_movements_selected_is_a_hard_block_even_if_confirmed():
     for confirmed in (False, True):
         r = analyze_user_selection(frames, "test.mp4", 5, 175, user_confirmed_swing=confirmed)
         assert r.status != "experimental_result"
-        if r.status == "multiple_movements":
-            assert "more than one movement" in r.reason
-            assert r.result is None
+        # BL-008C.37: 120 frames apart is a clear split even without timestamps
+        assert r.status == "multiple_movements"
+        assert "separate fast movements" in r.reason
+        assert r.result is None
 
 
 def test_missing_video_file_rejected():

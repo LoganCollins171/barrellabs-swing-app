@@ -104,6 +104,11 @@ def _button(at, label):
     return next(b for b in at.button if b.label == label)
 
 
+def _confirm(at):
+    """BL-008C.37: the confirmation checkbox is keyed to the exact selection."""
+    return next(c for c in at.checkbox if str(c.key or "").startswith("manual_review_confirm_"))
+
+
 @pytest.fixture(autouse=True)
 def _real_streamlit_auth_modules(monkeypatch):
     """Other (stub-based) auth tests re-import these modules while a fake
@@ -138,24 +143,24 @@ def test_full_experimental_flow_without_ffprobe(suffix, original_hash, no_ffprob
     fps = at.session_state["manual_review_fps"]
     assert fps is not None and 50 < fps < 61, fps
 
-    at.slider(key="manual_review_slider").set_value((25, 55)).run()
+    at.slider(key="manual_review_slider").set_value((24, 56)).run()
     _button(at, "Check this selection").click().run()
     assert billing["charges"] == [], "checking a selection is free"
-    at.checkbox(key="manual_review_confirm_checkbox").check().run()
+    _confirm(at).check().run()
     _button(at, "Analyze this selection").click().run()
 
     out = _texts(at)
-    assert "Analyzed exactly what you selected: frames 25-55" in out
+    assert "Analyzed exactly what you selected: frames 24-56" in out
     # BL-008C.36: labels are each frame's REAL timestamp (this clip has uneven
     # frame timing, so frame/avg-fps would be off), never an assumed 30 fps.
     pts = at.session_state["manual_review_pts"]
-    assert f"~{pts[25]:.2f}s to ~{pts[55]:.2f}s" in out
+    assert f"~{pts[24]:.2f}s to ~{pts[56]:.2f}s" in out
     assert "~0.83s" not in out, "never the fabricated-30-fps label"
     assert "EXPERIMENTAL" in out and "not automatically verified" in out
     assert len(billing["charges"]) == 1, "a successful experimental analysis charges exactly once"
 
     at.run()  # an unrelated rerun
-    at.slider(key="manual_review_slider").set_value((25, 55)).run()
+    at.slider(key="manual_review_slider").set_value((24, 56)).run()
     assert len(billing["charges"]) == 1, "reruns must never charge again"
 
 
@@ -176,9 +181,9 @@ def test_decode_failure_shows_error_and_never_charges(original_hash, no_ffprobe,
 def test_failed_charge_hides_result_and_retry_is_double_charge_safe(original_hash, no_ffprobe, billing):
     video = _staged_copy(".mp4")
     at = _app(video).run()
-    at.slider(key="manual_review_slider").set_value((25, 55)).run()
+    at.slider(key="manual_review_slider").set_value((24, 56)).run()
     _button(at, "Check this selection").click().run()
-    at.checkbox(key="manual_review_confirm_checkbox").check().run()
+    _confirm(at).check().run()
 
     billing["fail_next"] = 1
     _button(at, "Analyze this selection").click().run()
@@ -192,12 +197,19 @@ def test_failed_charge_hides_result_and_retry_is_double_charge_safe(original_has
         "the retry of a failed charge must reuse the same idempotency key"
 
 
-def test_whole_clip_with_several_movements_is_blocked_and_free(original_hash, no_ffprobe, billing):
+def test_whole_clip_without_a_clear_swing_warns_but_does_not_block(original_hash, no_ffprobe, billing):
+    """BL-008C.37: sample_swing.mp4 actually shows a batter in his stance with
+    no swing (reviewed frame by frame). The old check hard-blocked the whole
+    clip as "more than one distinct movement"; the new one says it isn't
+    sure, explains why, and lets an informed user continue. Checking is free
+    and Analyze stays disabled until the user confirms."""
     video = _staged_copy(".mp4")
     at = _app(video).run()
     _button(at, "Check this selection").click().run()   # default = whole clip
-    assert "more than one distinct movement" in _texts(at)
-    assert not [b for b in at.button if b.label == "Analyze this selection"]
+    out = _texts(at)
+    assert "more than one distinct movement" not in out
+    assert "Not sure about this selection" in out
+    assert _button(at, "Analyze this selection").disabled
     assert billing["charges"] == []
 
 
@@ -230,9 +242,9 @@ def test_logout_or_dead_session_wipes_experimental_state_without_charging(
     at.session_state["manual_review_video_path"] = str(video)
     at.session_state["supabase_session"] = {"access_token": "a", "refresh_token": "r", "user_id": "u1"}
     at.run()
-    at.slider(key="manual_review_slider").set_value((25, 55)).run()
+    at.slider(key="manual_review_slider").set_value((24, 56)).run()
     _button(at, "Check this selection").click().run()
-    at.checkbox(key="manual_review_confirm_checkbox").check().run()
+    _confirm(at).check().run()
     _button(at, "Analyze this selection").click().run()
     assert "Analyzed exactly what you selected" in _texts(at)
     assert len(billing["charges"]) == 1
